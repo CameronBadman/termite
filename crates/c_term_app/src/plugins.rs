@@ -62,6 +62,24 @@ impl PluginFrame<'_> {
         )
     }
 
+    pub(crate) fn blend_cursor_edge(
+        &mut self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        self.blend_ellipse_ring(
+            x,
+            y,
+            CELL_WIDTH as f32 * 0.68 * scale,
+            CELL_HEIGHT as f32 * 0.72 * scale,
+            color,
+            alpha,
+        )
+    }
+
     pub(crate) fn blend_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
         self.blend_rect(
             0,
@@ -128,6 +146,43 @@ impl PluginFrame<'_> {
                     continue;
                 }
                 let local_alpha = (alpha as f32 * (1.0 - distance).powf(1.7)) as u8;
+                if local_alpha == 0 {
+                    continue;
+                }
+                blend_pixel(self.frame, self.width_px, px, py, color, local_alpha);
+            }
+        }
+    }
+
+    fn blend_ellipse_ring(
+        &mut self,
+        x: f32,
+        y: f32,
+        radius_x: f32,
+        radius_y: f32,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        if self.width_px == 0 || radius_x <= 0.0 || radius_y <= 0.0 {
+            return;
+        }
+        let height_px = self.frame.len() / self.width_px / 4;
+        let x_start = (x - radius_x).floor().max(0.0) as usize;
+        let y_start = (y - radius_y).floor().max(0.0) as usize;
+        let x_end = (x + radius_x).ceil().min(self.width_px as f32) as usize;
+        let y_end = (y + radius_y).ceil().min(height_px as f32) as usize;
+
+        for py in y_start..y_end {
+            let dy = (py as f32 + 0.5 - y) / radius_y;
+            for px in x_start..x_end {
+                let dx = (px as f32 + 0.5 - x) / radius_x;
+                let distance = (dx * dx + dy * dy).sqrt();
+                if distance > 1.0 {
+                    continue;
+                }
+                let inner = smoothstep(0.42, 0.74, distance);
+                let outer = 1.0 - smoothstep(0.86, 1.0, distance);
+                let local_alpha = (alpha as f32 * inner * outer) as u8;
                 if local_alpha == 0 {
                     continue;
                 }
@@ -234,6 +289,7 @@ impl CursorTrail {
         self.trails
             .retain(|trail| frame.now.duration_since(trail.started) < decay);
 
+        let edge = lift_color(self.config.color, 1.35, 24);
         for trail in &self.trails {
             let age = frame.now.duration_since(trail.started);
             let raw = (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
@@ -248,9 +304,13 @@ impl CursorTrail {
                 let alpha = (150.0 * fade * tail).clamp(0.0, 150.0) as u8;
                 let scale = 0.55 + tail * 0.55;
                 frame.blend_cursor_glow(x, y, scale * 1.35, self.config.color, alpha / 5);
+                frame.blend_cursor_edge(x, y, scale * 1.08, [8, 10, 12], alpha / 10);
+                frame.blend_cursor_edge(x, y, scale, edge, alpha / 3);
                 frame.blend_cursor_at(x, y, scale, self.config.color, alpha);
             }
             let (x, y) = cursor_point(trail.from, trail.to, progress);
+            frame.blend_cursor_edge(x, y, 1.18, [8, 10, 12], (42.0 * fade) as u8);
+            frame.blend_cursor_edge(x, y, 1.08, edge, (90.0 * fade) as u8);
             frame.blend_cursor_at(x, y, 1.08, self.config.color, (210.0 * fade) as u8);
         }
     }
@@ -278,6 +338,15 @@ fn cursor_point(from: Cursor, to: Cursor, t: f32) -> (f32, f32) {
 
 fn ease_out_quart(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(4)
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let value = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
+}
+
+fn lift_color(color: [u8; 3], scale: f32, offset: u8) -> [u8; 3] {
+    color.map(|channel| ((f32::from(channel) * scale) as u16 + u16::from(offset)).min(255) as u8)
 }
 
 fn cell_width() -> usize {
