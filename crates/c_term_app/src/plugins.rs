@@ -374,16 +374,17 @@ impl CursorTrail {
     }
 
     fn draw_trails(&mut self, frame: &mut PluginFrame<'_>) {
-        let decay = Duration::from_millis(self.config.decay_ms.max(1));
-        self.trails
-            .retain(|trail| frame.now.duration_since(trail.started) < decay);
+        self.trails.retain(|trail| {
+            frame.now.duration_since(trail.started) < trail_decay(self.config, trail)
+        });
 
         let edge = lift_color(self.config.color, 1.25, 28);
         let hot = lift_color(self.config.color, 1.8, 64);
         for trail in &self.trails {
+            let decay = trail_decay(self.config, trail);
             let age = frame.now.duration_since(trail.started);
             let raw = (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
-            let progress = ease_out_quart(raw);
+            let progress = exponential_ease_out(raw);
             let fade = 1.0 - raw;
             let start = (progress - self.config.length).max(0.0);
             let tail = cursor_point(trail.from, trail.to, start);
@@ -445,8 +446,20 @@ fn cursor_point(from: Cursor, to: Cursor, t: f32) -> (f32, f32) {
     (from_x + (to_x - from_x) * t, from_y + (to_y - from_y) * t)
 }
 
-fn ease_out_quart(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(4)
+fn exponential_ease_out(t: f32) -> f32 {
+    if t >= 1.0 {
+        1.0
+    } else {
+        1.0 - 2.0_f32.powf(-10.0 * t)
+    }
+}
+
+fn trail_decay(config: CursorTrailConfig, trail: &Trail) -> Duration {
+    let max_ms = config.decay_ms.max(1) as f32;
+    let min_ms = (max_ms * 0.38).max(1.0);
+    let distance = f32::from(cursor_distance(trail.from, trail.to));
+    let distance_factor = (distance / 40.0).clamp(0.0, 1.0);
+    Duration::from_millis((min_ms + (max_ms - min_ms) * distance_factor) as u64)
 }
 
 fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
@@ -620,6 +633,74 @@ mod tests {
         };
 
         assert_eq!(cursor_point(from, to, 0.5), (12.0, 8.0));
+    }
+
+    #[test]
+    fn cursor_trail_easing_moves_fast_then_settles() {
+        assert_eq!(exponential_ease_out(0.0), 0.0);
+        assert_eq!(exponential_ease_out(1.0), 1.0);
+
+        let first_step = exponential_ease_out(0.1) - exponential_ease_out(0.0);
+        let second_step = exponential_ease_out(0.2) - exponential_ease_out(0.1);
+        assert!(first_step > second_step);
+        assert!(exponential_ease_out(0.5) > 0.95);
+    }
+
+    #[test]
+    fn cursor_trail_decay_scales_with_jump_distance() {
+        let config = CursorTrailConfig {
+            hold_ms: 0,
+            decay_ms: 300,
+            threshold: 1,
+            length: 1.0,
+            color: [255, 0, 0],
+        };
+        let near = Trail {
+            from: Cursor {
+                x: 0,
+                y: 0,
+                visible: true,
+            },
+            to: Cursor {
+                x: 2,
+                y: 0,
+                visible: true,
+            },
+            started: Instant::now(),
+        };
+        let far = Trail {
+            to: Cursor { x: 40, ..near.to },
+            ..near
+        };
+
+        assert!(trail_decay(config, &near) < trail_decay(config, &far));
+        assert_eq!(trail_decay(config, &far), Duration::from_millis(300));
+    }
+
+    #[test]
+    fn cursor_trail_decay_respects_low_configured_values() {
+        let config = CursorTrailConfig {
+            hold_ms: 0,
+            decay_ms: 20,
+            threshold: 1,
+            length: 1.0,
+            color: [255, 0, 0],
+        };
+        let trail = Trail {
+            from: Cursor {
+                x: 0,
+                y: 0,
+                visible: true,
+            },
+            to: Cursor {
+                x: 40,
+                y: 0,
+                visible: true,
+            },
+            started: Instant::now(),
+        };
+
+        assert_eq!(trail_decay(config, &trail), Duration::from_millis(20));
     }
 
     #[test]
