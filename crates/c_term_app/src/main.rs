@@ -2,6 +2,7 @@ use std::{env, ffi::CString, fs::File, io, os::fd::RawFd};
 
 mod config;
 mod plugins;
+mod runner;
 mod window_backend;
 
 use nix::{
@@ -10,7 +11,7 @@ use nix::{
 };
 
 fn main() {
-    if let Err(error) = window_backend::run() {
+    if let Err(error) = config::runner().run() {
         eprintln!("c-term: {error}");
         std::process::exit(1);
     }

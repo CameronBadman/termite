@@ -25,19 +25,40 @@ framebuffer, not a proper shaped text/glyph-atlas pipeline yet.
 
 The app includes a small built-in cursor-line plugin in `crates/c_term_app/src/plugins.rs`.
 
-## Config
+## Compiled Config
 
-Optional config is read from `$C_TERM_CONFIG`, then `$XDG_CONFIG_HOME/c-term/config`, then
-`~/.config/c-term/config`. Lines starting with `#` are comments.
+Configuration is Rust code. Edit `crates/c_term_app/src/config.rs`, then rebuild.
 
-The repo includes a ready-to-copy `config.example`.
+Plugins and plugin groups are composed with `Runner::with(...)`. A group can return `impl
+RunnerPart`, so local config can be split across small functions instead of one large list.
 
-```conf
-plugin cursor_line
-plugin cursor_trail
-cursor_trail_hold_ms 20
-cursor_trail_decay_ms 280
-cursor_trail_threshold 2
-cursor_trail_length 1.0
-cursor_trail_color #68f7ff
+```rust
+pub(crate) fn runner() -> Runner {
+    Runner::new().with(default_plugins())
+}
+
+fn default_plugins() -> impl RunnerPart {
+    parts()
+        .with(cursor_line())
+        .with(cursor_trail())
+}
+
+fn cursor_line() -> CursorLine {
+    CursorLine::new(CursorLineConfig {
+        row_color: [32, 80, 96],
+        row_alpha: 48,
+        cell_color: [255, 205, 96],
+        cell_alpha: 64,
+    })
+}
+```
+
+`parts()` can be nested, so presets can be split by area:
+
+```rust
+fn daily_driver() -> impl RunnerPart {
+    parts()
+        .with(visuals())
+        .with(my_local_plugins())
+}
 ```
