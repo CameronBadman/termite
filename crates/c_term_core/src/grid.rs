@@ -1,4 +1,4 @@
-use crate::{DamageRegion, DamageTracker, Generation};
+use crate::{DamageRegion, DamageTracker, EraseMode, Generation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -57,6 +57,9 @@ pub struct Grid {
     height: u16,
     cells: Vec<Cell>,
     cursor: Cursor,
+    scroll_top: u16,
+    scroll_bottom: u16,
+    wrap: bool,
     generation: Generation,
     damage: DamageTracker,
 }
@@ -75,6 +78,9 @@ impl Grid {
                 y: 0,
                 visible: true,
             },
+            scroll_top: 0,
+            scroll_bottom: height.saturating_sub(1),
+            wrap: true,
             generation: 1,
             damage,
         }
@@ -162,9 +168,53 @@ impl Grid {
         self.move_cursor(x, y)
     }
 
-    pub fn clear_screen(&mut self) {
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        if self.cursor.visible == visible {
+            return;
+        }
+        let old = self.cursor;
+        self.cursor.visible = visible;
+        self.generation += 1;
+        self.damage.mark(DamageRegion::Cursor {
+            old: Some((old.x, old.y)),
+            new: (self.cursor.x, self.cursor.y),
+        });
+    }
+
+    pub fn set_wrap(&mut self, enabled: bool) {
+        self.wrap = enabled;
+    }
+
+    pub fn set_scroll_region(&mut self, top: u16, bottom: u16) {
+        let top = top.min(self.height.saturating_sub(1));
+        let bottom = bottom.min(self.height.saturating_sub(1));
+        if top < bottom {
+            self.scroll_top = top;
+            self.scroll_bottom = bottom;
+            let _ = self.move_cursor(0, 0);
+        } else {
+            self.reset_scroll_region();
+        }
+    }
+
+    pub fn reset_scroll_region(&mut self) {
+        self.scroll_top = 0;
+        self.scroll_bottom = self.height.saturating_sub(1);
+    }
+
+    pub fn clear_screen(&mut self, mode: EraseMode) {
+        let range = match mode {
+            EraseMode::All => 0..self.cells.len(),
+            EraseMode::FromCursor => {
+                self.index(self.cursor.x, self.cursor.y).unwrap_or(0)..self.cells.len()
+            }
+            EraseMode::ToCursor => {
+                let end = self.index(self.cursor.x, self.cursor.y).unwrap_or(0) + 1;
+                0..end
+            }
+        };
         let mut changed = false;
-        for cell in &mut self.cells {
+        for cell in &mut self.cells[range] {
             if *cell != Cell::default() {
                 *cell = Cell::default();
                 changed = true;
@@ -176,9 +226,22 @@ impl Grid {
         }
     }
 
-    pub fn clear_line_from_cursor(&mut self) {
-        let start = self.index(self.cursor.x, self.cursor.y).unwrap_or(0);
-        let end = usize::from(self.cursor.y + 1) * usize::from(self.width);
+    pub fn clear_line(&mut self, mode: EraseMode) {
+        let row_start = usize::from(self.cursor.y) * usize::from(self.width);
+        let row_end = row_start + usize::from(self.width);
+        let cursor = self
+            .index(self.cursor.x, self.cursor.y)
+            .unwrap_or(row_start);
+        let (start, end, x, width) = match mode {
+            EraseMode::FromCursor => (
+                cursor,
+                row_end,
+                self.cursor.x,
+                self.width.saturating_sub(self.cursor.x),
+            ),
+            EraseMode::ToCursor => (row_start, cursor + 1, 0, self.cursor.x.saturating_add(1)),
+            EraseMode::All => (row_start, row_end, 0, self.width),
+        };
         let mut changed = false;
         for cell in &mut self.cells[start..end] {
             if *cell != Cell::default() {
@@ -189,9 +252,9 @@ impl Grid {
         if changed {
             self.generation += 1;
             self.damage.mark(DamageRegion::Cells {
-                x: self.cursor.x,
+                x,
                 y: self.cursor.y,
-                width: self.width.saturating_sub(self.cursor.x),
+                width,
                 height: 1,
             });
         }
@@ -210,6 +273,7 @@ impl Grid {
         );
         self.cursor.x = self.cursor.x.min(self.width - 1);
         self.cursor.y = self.cursor.y.min(self.height - 1);
+        self.reset_scroll_region();
         self.generation += 1;
         self.damage.mark(DamageRegion::Viewport);
         true
@@ -231,9 +295,15 @@ impl Grid {
         let old = self.cursor;
         if self.cursor.x + 1 < self.width {
             self.cursor.x += 1;
+        } else if !self.wrap {
+            self.cursor.x = self.width.saturating_sub(1);
         } else {
             self.cursor.x = 0;
-            self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
+            if self.cursor.y == self.scroll_bottom {
+                self.scroll_up_region();
+            } else {
+                self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
+            }
         }
 
         if old != self.cursor {
@@ -248,10 +318,10 @@ impl Grid {
     fn line_feed(&mut self) {
         let old = self.cursor;
         self.cursor.x = 0;
-        if self.cursor.y + 1 >= self.height {
-            self.scroll_up();
+        if self.cursor.y == self.scroll_bottom {
+            self.scroll_up_region();
         } else {
-            self.cursor.y += 1;
+            self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
         }
         if old != self.cursor {
             self.generation += 1;
@@ -262,15 +332,42 @@ impl Grid {
         }
     }
 
-    fn scroll_up(&mut self) {
-        if self.height <= 1 {
-            self.cells.fill(Cell::default());
+    pub fn reverse_index(&mut self) {
+        let old = self.cursor;
+        if self.cursor.y == self.scroll_top {
+            self.scroll_down_region();
         } else {
-            let width = usize::from(self.width);
-            self.cells.copy_within(width.., 0);
-            let last_row = self.cells.len() - width;
-            self.cells[last_row..].fill(Cell::default());
+            self.cursor.y = self.cursor.y.saturating_sub(1);
         }
+        if old != self.cursor {
+            self.generation += 1;
+            self.damage.mark(DamageRegion::Cursor {
+                old: Some((old.x, old.y)),
+                new: (self.cursor.x, self.cursor.y),
+            });
+        }
+    }
+
+    fn scroll_up_region(&mut self) {
+        let width = usize::from(self.width);
+        let top = usize::from(self.scroll_top) * width;
+        let bottom = usize::from(self.scroll_bottom) * width;
+        if self.scroll_top < self.scroll_bottom {
+            self.cells.copy_within(top + width..bottom + width, top);
+        }
+        self.cells[bottom..bottom + width].fill(Cell::default());
+        self.generation += 1;
+        self.damage.mark(DamageRegion::Viewport);
+    }
+
+    fn scroll_down_region(&mut self) {
+        let width = usize::from(self.width);
+        let top = usize::from(self.scroll_top) * width;
+        let bottom = usize::from(self.scroll_bottom) * width;
+        if self.scroll_top < self.scroll_bottom {
+            self.cells.copy_within(top..bottom, top + width);
+        }
+        self.cells[top..top + width].fill(Cell::default());
         self.generation += 1;
         self.damage.mark(DamageRegion::Viewport);
     }

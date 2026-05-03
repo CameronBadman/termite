@@ -377,7 +377,7 @@ fn draw_grid_to_frame(grid: &Grid, frame: &mut [u8]) {
                 y,
                 cell.ch,
                 cell.style,
-                grid.cursor().x == x && grid.cursor().y == y,
+                grid.cursor().visible && grid.cursor().x == x && grid.cursor().y == y,
             );
         }
     }

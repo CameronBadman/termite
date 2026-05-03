@@ -9,8 +9,13 @@ pub enum ParserAction {
     SetTitle(String),
     MoveCursor { x: u16, y: u16 },
     MoveCursorRelative { dx: i16, dy: i16 },
-    ClearScreen,
-    ClearLineFromCursor,
+    SaveCursor,
+    RestoreCursor,
+    ReverseIndex,
+    SetScrollRegion { top: u16, bottom: u16 },
+    ClearScreen(EraseMode),
+    ClearLine(EraseMode),
+    SetMode { mode: TerminalMode, enabled: bool },
     SetStyle(StyleUpdate),
     ResetStyle,
 }
@@ -26,6 +31,20 @@ pub enum StyleUpdate {
     Bold(bool),
     Italic(bool),
     Underline(bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraseMode {
+    FromCursor,
+    ToCursor,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalMode {
+    AlternateScreen,
+    CursorVisible,
+    Wrap,
 }
 
 pub struct SimpleParser {
@@ -101,7 +120,16 @@ impl vte::Perform for ActionPerformer<'_> {
         ignore: bool,
         action: char,
     ) {
-        if ignore || !intermediates.is_empty() {
+        if ignore {
+            return;
+        }
+
+        let private = intermediates == b"?";
+        if private && matches!(action, 'h' | 'l') {
+            self.mode(params, action == 'h');
+            return;
+        }
+        if !intermediates.is_empty() {
             return;
         }
 
@@ -118,11 +146,31 @@ impl vte::Perform for ActionPerformer<'_> {
                 x: param(params, 1, 1).saturating_sub(1),
                 y: param(params, 0, 1).saturating_sub(1),
             }),
-            'J' if param(params, 0, 0) == 2 => self.actions.push(ParserAction::ClearScreen),
-            'K' if matches!(param(params, 0, 0), 0 | 2) => {
-                self.actions.push(ParserAction::ClearLineFromCursor)
-            }
+            'J' => self
+                .actions
+                .push(ParserAction::ClearScreen(erase_mode(params))),
+            'K' => self
+                .actions
+                .push(ParserAction::ClearLine(erase_mode(params))),
             'm' => self.sgr(params),
+            'r' => self.actions.push(ParserAction::SetScrollRegion {
+                top: param(params, 0, 1).saturating_sub(1),
+                bottom: param(params, 1, u16::MAX).saturating_sub(1),
+            }),
+            's' => self.actions.push(ParserAction::SaveCursor),
+            'u' => self.actions.push(ParserAction::RestoreCursor),
+            _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+        if ignore || !intermediates.is_empty() {
+            return;
+        }
+        match byte {
+            b'7' => self.actions.push(ParserAction::SaveCursor),
+            b'8' => self.actions.push(ParserAction::RestoreCursor),
+            b'M' => self.actions.push(ParserAction::ReverseIndex),
             _ => {}
         }
     }
@@ -140,7 +188,14 @@ impl ActionPerformer<'_> {
             return;
         }
 
-        for code in params.iter().filter_map(|param| param.first()).copied() {
+        let codes: Vec<_> = params
+            .iter()
+            .flat_map(|param| param.iter())
+            .copied()
+            .collect();
+        let mut index = 0;
+        while index < codes.len() {
+            let code = codes[index];
             match code {
                 0 => self.actions.push(ParserAction::ResetStyle),
                 1 => self
@@ -191,8 +246,32 @@ impl ActionPerformer<'_> {
                     .push(ParserAction::SetStyle(StyleUpdate::Background(
                         crate::Color::Indexed((code - 100 + 8) as u8),
                     ))),
+                38 | 48 => {
+                    if let Some((color, consumed)) = extended_color(&codes[index + 1..]) {
+                        let update = if code == 38 {
+                            StyleUpdate::Foreground(color)
+                        } else {
+                            StyleUpdate::Background(color)
+                        };
+                        self.actions.push(ParserAction::SetStyle(update));
+                        index += consumed;
+                    }
+                }
                 _ => {}
             }
+            index += 1;
+        }
+    }
+
+    fn mode(&mut self, params: &vte::Params, enabled: bool) {
+        for code in params.iter().filter_map(|param| param.first()).copied() {
+            let mode = match code {
+                7 => TerminalMode::Wrap,
+                25 => TerminalMode::CursorVisible,
+                47 | 1047 | 1049 => TerminalMode::AlternateScreen,
+                _ => continue,
+            };
+            self.actions.push(ParserAction::SetMode { mode, enabled });
         }
     }
 }
@@ -209,4 +288,27 @@ fn param(params: &vte::Params, index: usize, default: u16) -> u16 {
 
 fn amount(params: &vte::Params, index: usize, default: u16) -> i16 {
     param(params, index, default).min(i16::MAX as u16) as i16
+}
+
+fn erase_mode(params: &vte::Params) -> EraseMode {
+    match param(params, 0, 0) {
+        1 => EraseMode::ToCursor,
+        2 | 3 => EraseMode::All,
+        _ => EraseMode::FromCursor,
+    }
+}
+
+fn extended_color(codes: &[u16]) -> Option<(crate::Color, usize)> {
+    match codes {
+        [5, index, ..] => Some((crate::Color::Indexed((*index).min(u8::MAX as u16) as u8), 2)),
+        [2, r, g, b, ..] => Some((
+            crate::Color::Rgb(
+                (*r).min(u8::MAX as u16) as u8,
+                (*g).min(u8::MAX as u16) as u8,
+                (*b).min(u8::MAX as u16) as u8,
+            ),
+            4,
+        )),
+        _ => None,
+    }
 }
