@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    env,
     error::Error,
     fs,
     io::{self, Read, Write},
@@ -29,7 +28,7 @@ use winit::{
 use crate::{PtyChild, set_pty_winsize, spawn_shell};
 use crate::{
     plugins::{PluginFrame, PluginHost},
-    runner::Runner,
+    runner::{FontConfig, Runner},
 };
 
 pub(crate) const CELL_WIDTH: u32 = 8;
@@ -40,8 +39,6 @@ const DELAYED_RENDER_UPPER_NS: u64 = 4_000_000;
 const APP_SYNC_TIMEOUT_MS: u64 = 1_000;
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 540;
-const FONT_SIZE: f32 = 14.0;
-
 #[derive(Debug)]
 enum UserEvent {
     PtyBytes(Vec<u8>),
@@ -52,8 +49,8 @@ pub(crate) fn run(runner: Runner) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let (shell, plugins) = runner.into_parts();
-    let mut state = WindowBackend::new(shell, event_loop.create_proxy(), plugins);
+    let (shell, plugins, font) = runner.into_parts();
+    let mut state = WindowBackend::new(shell, event_loop.create_proxy(), plugins, font);
     event_loop.run_app(&mut state)?;
     Ok(())
 }
@@ -87,12 +84,12 @@ struct RenderCache {
 }
 
 impl RenderCache {
-    fn new() -> Self {
+    fn new(font: FontConfig) -> Self {
         Self {
             frame: Vec::new(),
             dirty_rows: Vec::new(),
             dirty: true,
-            text: TextRenderer::new(),
+            text: TextRenderer::new(font),
         }
     }
 
@@ -179,7 +176,12 @@ impl RenderCache {
 }
 
 impl WindowBackend {
-    fn new(shell: String, proxy: EventLoopProxy<UserEvent>, plugins: PluginHost) -> Self {
+    fn new(
+        shell: String,
+        proxy: EventLoopProxy<UserEvent>,
+        plugins: PluginHost,
+        font: FontConfig,
+    ) -> Self {
         Self {
             shell,
             proxy,
@@ -191,7 +193,7 @@ impl WindowBackend {
             modifiers: ModifiersState::empty(),
             cols: 1,
             rows: 1,
-            render_cache: RenderCache::new(),
+            render_cache: RenderCache::new(font),
             mouse_buttons: 0,
             mouse_position: None,
             animation_deadline: None,
@@ -798,9 +800,9 @@ struct TextRenderer {
 }
 
 impl TextRenderer {
-    fn new() -> Self {
+    fn new(font: FontConfig) -> Self {
         Self {
-            fonts: load_fonts(),
+            fonts: load_fonts(font),
             glyphs: HashMap::new(),
         }
     }
@@ -870,28 +872,21 @@ impl TextRenderer {
     }
 }
 
-fn load_fonts() -> Vec<LoadedFont> {
-    let mut paths = Vec::new();
-    paths.extend(env::var_os("TERMITE_FONT").and_then(|path| path.into_string().ok()));
-    paths.extend(env::var_os("C_TERM_FONT").and_then(|path| path.into_string().ok()));
+fn load_fonts(font: FontConfig) -> Vec<LoadedFont> {
+    let FontConfig::GlyphAtlas { path, size } = font else {
+        return Vec::new();
+    };
 
     let mut loaded = Vec::new();
-    for (index, path) in paths.iter().enumerate() {
-        if paths[..index].contains(path) {
-            continue;
-        }
-        let Ok(bytes) = fs::read(path) else {
-            continue;
-        };
-        let Ok(font) = FontArc::try_from_vec(bytes) else {
-            continue;
-        };
-        let scaled = font.as_scaled(FONT_SIZE);
+    if let Ok(bytes) = fs::read(path)
+        && let Ok(font) = FontArc::try_from_vec(bytes)
+    {
+        let scaled = font.as_scaled(size);
         let ascent = scaled.ascent();
         let height = scaled.height();
         loaded.push(LoadedFont {
             font,
-            scale: PxScale::from(FONT_SIZE),
+            scale: PxScale::from(size),
             ascent,
             height,
         });
@@ -1173,7 +1168,7 @@ mod tests {
     fn base_frame_cache_updates_only_dirty_rows() {
         let mut terminal = TerminalCore::new(4, 2);
         let _ = terminal.process_pty_input(b"A\x1b[2;1HB");
-        let mut cache = RenderCache::new();
+        let mut cache = RenderCache::new(FontConfig::Bitmap8x8);
 
         let frame = cache.update(terminal.grid());
         let first_row = frame[..CELL_HEIGHT as usize * 4 * CELL_WIDTH as usize * 4].to_vec();

@@ -4,9 +4,20 @@ use crate::{plugins::PluginHost, window_backend};
 
 type InstallPart = Box<dyn FnOnce(&mut Runner)>;
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum FontConfig {
+    #[default]
+    Bitmap8x8,
+    GlyphAtlas {
+        path: String,
+        size: f32,
+    },
+}
+
 pub(crate) struct Runner {
     shell: String,
     plugins: PluginHost,
+    font: FontConfig,
 }
 
 impl Runner {
@@ -14,6 +25,7 @@ impl Runner {
         Self {
             shell: env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned()),
             plugins: PluginHost::new(),
+            font: FontConfig::default(),
         }
     }
 
@@ -26,17 +38,26 @@ impl Runner {
         window_backend::run(self)
     }
 
-    pub(crate) fn into_parts(self) -> (String, PluginHost) {
-        (self.shell, self.plugins)
+    pub(crate) fn into_parts(self) -> (String, PluginHost, FontConfig) {
+        (self.shell, self.plugins, self.font)
     }
 
     fn add_plugin(&mut self, plugin: impl crate::plugins::Plugin + 'static) {
         self.plugins.add(plugin);
     }
 
+    fn set_font(&mut self, font: FontConfig) {
+        self.font = font;
+    }
+
     #[cfg(test)]
     pub(crate) fn plugin_count(&self) -> usize {
         self.plugins.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn font(&self) -> &FontConfig {
+        &self.font
     }
 }
 
@@ -50,6 +71,29 @@ where
 {
     fn install(self, runner: &mut Runner) {
         runner.add_plugin(self);
+    }
+}
+
+pub(crate) fn bitmap_font() -> FontPart {
+    FontPart(FontConfig::Bitmap8x8)
+}
+
+pub(crate) fn font_file(path: impl Into<String>) -> FontPart {
+    font_file_with_size(path, 14.0)
+}
+
+pub(crate) fn font_file_with_size(path: impl Into<String>, size: f32) -> FontPart {
+    FontPart(FontConfig::GlyphAtlas {
+        path: path.into(),
+        size,
+    })
+}
+
+pub(crate) struct FontPart(FontConfig);
+
+impl RunnerPart for FontPart {
+    fn install(self, runner: &mut Runner) {
+        runner.set_font(self.0);
     }
 }
 

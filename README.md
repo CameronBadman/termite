@@ -35,6 +35,8 @@ Configuration is Rust code. Edit `crates/c_term_app/src/config.rs`, then rebuild
 
 Plugins and plugin groups are composed with `Runner::with(...)`. A group can return `impl
 RunnerPart`, so local config can be split across small functions instead of one large list.
+The default config also chooses the bitmap font through the same runner part system; flip
+`USE_TTF_FONT` and set `TTF_FONT_PATH` in `config.rs` to use a TTF glyph atlas.
 
 ```rust
 pub(crate) fn runner() -> Runner {

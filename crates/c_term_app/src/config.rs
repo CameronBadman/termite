@@ -1,14 +1,25 @@
 use crate::{
     plugins::{CursorLine, CursorLineConfig, CursorTrail, CursorTrailColor, CursorTrailConfig},
-    runner::{Runner, RunnerPart, parts},
+    runner::{Runner, RunnerPart, bitmap_font, font_file, parts},
 };
+
+const USE_TTF_FONT: bool = false;
+const TTF_FONT_PATH: &str = "/usr/share/fonts/liberation-fonts/LiberationMono-Regular.ttf";
 
 pub(crate) fn runner() -> Runner {
     Runner::new().with(basic_terminal())
 }
 
 fn basic_terminal() -> impl RunnerPart {
-    parts().with(cursor_overlays())
+    parts().with(terminal_font()).with(cursor_overlays())
+}
+
+fn terminal_font() -> impl RunnerPart {
+    if USE_TTF_FONT {
+        font_file(TTF_FONT_PATH)
+    } else {
+        bitmap_font()
+    }
 }
 
 fn cursor_overlays() -> impl RunnerPart {
@@ -46,7 +57,7 @@ fn cursor_trail_config() -> CursorTrailConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::parts;
+    use crate::runner::{FontConfig, font_file, parts};
 
     fn nested_plugins() -> impl RunnerPart {
         parts()
@@ -68,5 +79,18 @@ mod tests {
         let runner = Runner::new().with(nested_plugins());
 
         assert_eq!(runner.plugin_count(), 2);
+    }
+
+    #[test]
+    fn runner_config_can_select_font() {
+        let runner = Runner::new().with(font_file("/tmp/font.ttf"));
+
+        assert_eq!(
+            runner.font(),
+            &FontConfig::GlyphAtlas {
+                path: "/tmp/font.ttf".to_owned(),
+                size: 14.0,
+            }
+        );
     }
 }
