@@ -33,7 +33,7 @@ fn screen_tint_plugin() -> ScreenTint {
 fn screen_tint_config() -> ScreenTintConfig {
     ScreenTintConfig {
         color: [0, 0, 0],
-        alpha: 18,
+        alpha: 6,
     }
 }
 
