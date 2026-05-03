@@ -5,6 +5,7 @@ use std::{
     os::fd::AsRawFd,
     sync::Arc,
     thread,
+    time::{Duration, Instant},
 };
 
 use c_term_core::{Color, Grid, Style, TerminalCore};
@@ -19,8 +20,11 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::plugins::{PluginFrame, PluginHost};
 use crate::{PtyChild, set_pty_winsize, spawn_shell};
+use crate::{
+    config::AppConfig,
+    plugins::{PluginFrame, PluginHost},
+};
 
 pub(crate) const CELL_WIDTH: u32 = 8;
 pub(crate) const CELL_HEIGHT: u32 = 16;
@@ -30,6 +34,7 @@ const INITIAL_HEIGHT: u32 = 540;
 #[derive(Debug)]
 enum UserEvent {
     PtyBytes(Vec<u8>),
+    AnimationFrame,
     ChildExited,
 }
 
@@ -37,8 +42,9 @@ pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
+    let config = AppConfig::load();
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-    let mut state = WindowBackend::new(shell, event_loop.create_proxy());
+    let mut state = WindowBackend::new(shell, event_loop.create_proxy(), config);
     event_loop.run_app(&mut state)?;
     Ok(())
 }
@@ -54,21 +60,23 @@ struct WindowBackend {
     modifiers: ModifiersState,
     cols: u16,
     rows: u16,
+    animation_queued: bool,
 }
 
 impl WindowBackend {
-    fn new(shell: String, proxy: EventLoopProxy<UserEvent>) -> Self {
+    fn new(shell: String, proxy: EventLoopProxy<UserEvent>, config: AppConfig) -> Self {
         Self {
             shell,
             proxy,
             window: None,
             pixels: None,
             terminal: None,
-            plugins: PluginHost::default_plugins(),
+            plugins: PluginHost::from_config(&config),
             child: None,
             modifiers: ModifiersState::empty(),
             cols: 1,
             rows: 1,
+            animation_queued: false,
         }
     }
 
@@ -108,6 +116,18 @@ impl WindowBackend {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    fn schedule_animation(&mut self) {
+        if self.animation_queued {
+            return;
+        }
+        self.animation_queued = true;
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(16));
+            let _ = proxy.send_event(UserEvent::AnimationFrame);
+        });
     }
 
     fn handle_pty_bytes(&mut self, bytes: Vec<u8>) {
@@ -185,13 +205,18 @@ impl WindowBackend {
 
         let frame = pixels.frame_mut();
         draw_grid_to_frame(terminal.grid(), frame);
-        self.plugins.draw(&mut PluginFrame {
+        let now = Instant::now();
+        let plugin_active = self.plugins.draw(&mut PluginFrame {
             frame,
             width_px: usize::from(terminal.grid().width()) * CELL_WIDTH as usize,
             grid: terminal.grid(),
+            now,
         });
         if let Err(error) = pixels.render() {
             eprintln!("c-term: GPU render failed: {error}");
+        }
+        if plugin_active {
+            self.schedule_animation();
         }
     }
 }
@@ -207,6 +232,10 @@ impl ApplicationHandler<UserEvent> for WindowBackend {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyBytes(bytes) => self.handle_pty_bytes(bytes),
+            UserEvent::AnimationFrame => {
+                self.animation_queued = false;
+                self.mark_dirty();
+            }
             UserEvent::ChildExited => event_loop.exit(),
         }
     }
