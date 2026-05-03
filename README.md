@@ -30,6 +30,8 @@ The app includes a small built-in cursor-line plugin in `crates/c_term_app/src/p
 Optional config is read from `$C_TERM_CONFIG`, then `$XDG_CONFIG_HOME/c-term/config`, then
 `~/.config/c-term/config`. Lines starting with `#` are comments.
 
+The repo includes a ready-to-copy `config.example`.
+
 ```conf
 plugin cursor_line
 plugin cursor_trail
