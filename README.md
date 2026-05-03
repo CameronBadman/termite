@@ -5,7 +5,8 @@ Small Rust terminal emulator prototype.
 The workspace has two crates:
 
 - `c_term_core`: terminal parser, grid state, damage tracking, and terminal events.
-- `c_term_app`: PTY process management plus a `winit` window rendered through `pixels`/`wgpu`.
+- `c_term_app`: PTY process management, in-process plugins, and a `winit` window rendered through
+  `pixels`/`wgpu`.
 
 ## Run
 
@@ -21,3 +22,5 @@ Exit by leaving the shell normally (`exit` or Ctrl-D). Ctrl-Q is also handled as
 
 This is still an early renderer: glyphs are drawn with an 8x8 bitmap font into a `wgpu` pixel
 framebuffer, not a proper shaped text/glyph-atlas pipeline yet.
+
+The app includes a small built-in cursor-line plugin in `crates/c_term_app/src/plugins.rs`.

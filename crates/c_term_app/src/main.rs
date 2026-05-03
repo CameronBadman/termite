@@ -1,5 +1,6 @@
 use std::{ffi::CString, fs::File, io, os::fd::RawFd};
 
+mod plugins;
 mod window_backend;
 
 use nix::{

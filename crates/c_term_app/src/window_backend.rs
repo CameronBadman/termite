@@ -19,10 +19,11 @@ use winit::{
     window::{Window, WindowId},
 };
 
+use crate::plugins::{PluginFrame, PluginHost};
 use crate::{PtyChild, set_pty_winsize, spawn_shell};
 
-const CELL_WIDTH: u32 = 8;
-const CELL_HEIGHT: u32 = 16;
+pub(crate) const CELL_WIDTH: u32 = 8;
+pub(crate) const CELL_HEIGHT: u32 = 16;
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 540;
 
@@ -48,6 +49,7 @@ struct WindowBackend {
     window: Option<Arc<Window>>,
     pixels: Option<Pixels<'static>>,
     terminal: Option<TerminalCore>,
+    plugins: PluginHost,
     child: Option<PtyChild>,
     modifiers: ModifiersState,
     cols: u16,
@@ -62,6 +64,7 @@ impl WindowBackend {
             window: None,
             pixels: None,
             terminal: None,
+            plugins: PluginHost::default_plugins(),
             child: None,
             modifiers: ModifiersState::empty(),
             cols: 1,
@@ -180,7 +183,13 @@ impl WindowBackend {
             return;
         };
 
-        draw_grid_to_frame(terminal.grid(), pixels.frame_mut());
+        let frame = pixels.frame_mut();
+        draw_grid_to_frame(terminal.grid(), frame);
+        self.plugins.draw(&mut PluginFrame {
+            frame,
+            width_px: usize::from(terminal.grid().width()) * CELL_WIDTH as usize,
+            grid: terminal.grid(),
+        });
         if let Err(error) = pixels.render() {
             eprintln!("c-term: GPU render failed: {error}");
         }
