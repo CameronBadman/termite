@@ -8,8 +8,10 @@ type Point = (f32, f32);
 
 mod cursor_line;
 mod cursor_trail;
+mod screen_tint;
 pub(crate) use cursor_line::{CursorLine, CursorLineConfig};
 pub(crate) use cursor_trail::{CursorTrail, CursorTrailColor, CursorTrailConfig};
+pub(crate) use screen_tint::{ScreenTint, ScreenTintConfig};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum OverlayKind {
@@ -68,6 +70,17 @@ impl PluginFrame<'_> {
             usize::from(y) * cell_height(),
             usize::from(self.grid.width()) * cell_width(),
             cell_height(),
+            color,
+            alpha,
+        );
+    }
+
+    pub(crate) fn overlay_screen(&mut self, color: [u8; 3], alpha: u8) {
+        self.push_rect(
+            0,
+            0,
+            usize::from(self.grid.width()) * cell_width(),
+            usize::from(self.grid.height()) * cell_height(),
             color,
             alpha,
         );
@@ -153,6 +166,7 @@ mod tests {
     fn configured_plugins_emit_overlays() {
         let terminal = TerminalCore::new(4, 1);
         let mut host = PluginHost::new();
+        host.add(ScreenTint::default());
         host.add(CursorLine::default());
         host.add(CursorTrail::new(CursorTrailConfig::default()));
         let mut frame = frame_for(&terminal, Instant::now());

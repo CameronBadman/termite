@@ -1,5 +1,6 @@
 use crate::{
     plugins::{CursorLine, CursorLineConfig, CursorTrail, CursorTrailColor, CursorTrailConfig},
+    plugins::{ScreenTint, ScreenTintConfig},
     runner::{Runner, RunnerPart, bitmap_font, font_file, parts},
 };
 
@@ -20,8 +21,20 @@ fn terminal_font() -> impl RunnerPart {
 
 fn terminal_plugins() -> impl RunnerPart {
     parts()
+        .with(screen_tint_plugin())
         .with(cursor_line_plugin())
         .with(cursor_trail_plugin())
+}
+
+fn screen_tint_plugin() -> ScreenTint {
+    ScreenTint::new(screen_tint_config())
+}
+
+fn screen_tint_config() -> ScreenTintConfig {
+    ScreenTintConfig {
+        color: [0, 0, 0],
+        alpha: 18,
+    }
 }
 
 fn cursor_line_plugin() -> CursorLine {
@@ -58,6 +71,7 @@ mod tests {
 
     fn nested_plugins() -> impl RunnerPart {
         parts()
+            .with(parts().with(screen_tint_plugin()))
             .with(parts().with(cursor_line_plugin()))
             .with(parts().with(cursor_trail_plugin()))
     }
@@ -65,17 +79,18 @@ mod tests {
     #[test]
     fn runner_config_can_compose_plugin_groups() {
         let runner = Runner::new()
+            .with(parts().with(screen_tint_plugin()))
             .with(parts().with(cursor_line_plugin()))
             .with(parts().with(cursor_trail_plugin()));
 
-        assert_eq!(runner.plugin_count(), 2);
+        assert_eq!(runner.plugin_count(), 3);
     }
 
     #[test]
     fn runner_config_can_compose_nested_groups() {
         let runner = Runner::new().with(nested_plugins());
 
-        assert_eq!(runner.plugin_count(), 2);
+        assert_eq!(runner.plugin_count(), 3);
     }
 
     #[test]
