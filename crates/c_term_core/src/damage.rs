@@ -12,6 +12,12 @@ pub enum DamageRegion {
         old: Option<(u16, u16)>,
         new: (u16, u16),
     },
+    Scroll {
+        top: u16,
+        bottom: u16,
+        count: u16,
+        down: bool,
+    },
     Viewport,
 }
 

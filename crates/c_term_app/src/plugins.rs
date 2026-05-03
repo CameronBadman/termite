@@ -6,15 +6,39 @@ use crate::window_backend::{CELL_HEIGHT, CELL_WIDTH, rgb};
 
 type Point = (f32, f32);
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum OverlayKind {
+    Rect,
+    Quad,
+    QuadRing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct OverlayCommand {
+    pub(crate) kind: OverlayKind,
+    pub(crate) color: [u8; 3],
+    pub(crate) alpha: u8,
+    pub(crate) corners: [Point; 4],
+}
+
 pub(crate) struct PluginFrame<'a> {
     pub(crate) frame: &'a mut [u8],
     pub(crate) width_px: usize,
     pub(crate) grid: &'a Grid,
     pub(crate) now: Instant,
+    pub(crate) overlays: Vec<OverlayCommand>,
 }
 
 impl PluginFrame<'_> {
     pub(crate) fn blend_cell(&mut self, x: u16, y: u16, color: [u8; 3], alpha: u8) {
+        self.push_rect(
+            usize::from(x) * cell_width(),
+            usize::from(y) * cell_height(),
+            cell_width(),
+            cell_height(),
+            color,
+            alpha,
+        );
         self.blend_rect(
             usize::from(x) * cell_width(),
             usize::from(y) * cell_height(),
@@ -26,18 +50,38 @@ impl PluginFrame<'_> {
     }
 
     pub(crate) fn blend_quad(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
+        self.overlays.push(OverlayCommand {
+            kind: OverlayKind::Quad,
+            color,
+            alpha,
+            corners,
+        });
         self.blend_quad_with(corners, color, alpha, |edge_distance| {
             smoothstep(0.0, 1.25, edge_distance)
         });
     }
 
     pub(crate) fn blend_quad_ring(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
+        self.overlays.push(OverlayCommand {
+            kind: OverlayKind::QuadRing,
+            color,
+            alpha,
+            corners,
+        });
         self.blend_quad_with(corners, color, alpha, |edge_distance| {
             1.0 - smoothstep(1.0, 3.0, edge_distance)
         });
     }
 
     pub(crate) fn blend_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
+        self.push_rect(
+            0,
+            usize::from(y) * cell_height(),
+            usize::from(self.grid.width()) * cell_width(),
+            cell_height(),
+            color,
+            alpha,
+        );
         self.blend_rect(
             0,
             usize::from(y) * cell_height(),
@@ -46,6 +90,27 @@ impl PluginFrame<'_> {
             color,
             alpha,
         );
+    }
+
+    fn push_rect(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        let left = x as f32;
+        let top = y as f32;
+        let right = (x + width) as f32;
+        let bottom = (y + height) as f32;
+        self.overlays.push(OverlayCommand {
+            kind: OverlayKind::Rect,
+            color,
+            alpha,
+            corners: [(right, top), (right, bottom), (left, bottom), (left, top)],
+        });
     }
 
     fn blend_rect(
@@ -637,6 +702,7 @@ mod tests {
             width_px: 4 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now,
+            overlays: Vec::new(),
         }
     }
 
@@ -698,6 +764,7 @@ mod tests {
             width_px: 20 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now: start,
+            overlays: Vec::new(),
         }));
 
         let _ = terminal.process_pty_input(
@@ -709,6 +776,7 @@ mod tests {
             width_px: 20 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now: start + Duration::from_millis(1),
+            overlays: Vec::new(),
         }));
     }
 
@@ -726,6 +794,7 @@ mod tests {
             width_px: 20 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now: start,
+            overlays: Vec::new(),
         }));
 
         let _ = terminal.process_pty_input(b"\x1b[?1049h");
@@ -734,6 +803,7 @@ mod tests {
             width_px: 20 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now: start + Duration::from_millis(1),
+            overlays: Vec::new(),
         }));
     }
 
@@ -799,6 +869,7 @@ mod tests {
             width_px: 8 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now: start,
+            overlays: Vec::new(),
         }));
 
         let _ = terminal.process_pty_input(b"\x1b[?2026h\x1b[8G");
@@ -808,6 +879,7 @@ mod tests {
             width_px: 8 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now: start + Duration::from_millis(1),
+            overlays: Vec::new(),
         }));
     }
 
@@ -825,6 +897,7 @@ mod tests {
             width_px: 8 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now: start,
+            overlays: Vec::new(),
         }));
 
         let _ = terminal.process_pty_input(b"\x1b[2;1H");
@@ -834,6 +907,7 @@ mod tests {
             width_px: 8 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now: start + Duration::from_millis(30),
+            overlays: Vec::new(),
         }));
     }
 

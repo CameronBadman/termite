@@ -516,7 +516,12 @@ impl Grid {
         }
 
         self.generation += 1;
-        self.damage.mark(DamageRegion::Viewport);
+        self.damage.mark(DamageRegion::Scroll {
+            top,
+            bottom,
+            count: count as u16,
+            down,
+        });
     }
 
     fn mark_line_damage(&mut self, y: u16, x: u16, width: u16) {
