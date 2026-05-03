@@ -1,5 +1,8 @@
 use std::{
+    collections::HashMap,
+    env,
     error::Error,
+    fs,
     io::{self, Read, Write},
     os::fd::AsRawFd,
     sync::Arc,
@@ -7,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
 use c_term_core::{
     Color, CursorShape, DamageBatch, DamageRegion, Grid, MouseState, MouseTracking, Style,
     TerminalCore,
@@ -36,6 +40,7 @@ const DELAYED_RENDER_UPPER_NS: u64 = 4_000_000;
 const APP_SYNC_TIMEOUT_MS: u64 = 1_000;
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 540;
+const FONT_SIZE: f32 = 14.0;
 
 #[derive(Debug)]
 enum UserEvent {
@@ -78,6 +83,7 @@ struct RenderCache {
     frame: Vec<u8>,
     dirty_rows: Vec<bool>,
     dirty: bool,
+    text: TextRenderer,
 }
 
 impl RenderCache {
@@ -86,6 +92,7 @@ impl RenderCache {
             frame: Vec::new(),
             dirty_rows: Vec::new(),
             dirty: true,
+            text: TextRenderer::new(),
         }
     }
 
@@ -131,7 +138,8 @@ impl RenderCache {
         if self.dirty {
             self.frame.fill(0);
             for y in 0..grid.height() {
-                draw_grid_row_to_frame(grid, &mut self.frame, width, y);
+                self.text
+                    .draw_grid_row_to_frame(grid, &mut self.frame, width, y);
             }
             self.dirty_rows.fill(false);
             self.dirty = false;
@@ -146,11 +154,27 @@ impl RenderCache {
                 continue;
             }
             clear_grid_row(&mut self.frame, width, y);
-            draw_grid_row_to_frame(grid, &mut self.frame, width, y);
+            self.text
+                .draw_grid_row_to_frame(grid, &mut self.frame, width, y);
             *dirty = false;
         }
 
         &self.frame
+    }
+
+    fn draw_cursor(&mut self, grid: &Grid, frame: &mut [u8]) {
+        let cursor = grid.cursor();
+        if !cursor.visible {
+            return;
+        }
+        let Some(cell) = grid.cell(cursor.x, cursor.y) else {
+            return;
+        };
+        let width = usize::from(grid.width()) * CELL_WIDTH as usize;
+        let ch = if cell.spacer { ' ' } else { cell.ch };
+        self.text
+            .draw_cell(frame, width, cursor.x, cursor.y, ch, cell.style);
+        draw_cursor_shape(frame, width, cursor.x, cursor.y, cursor.shape);
     }
 }
 
@@ -416,14 +440,14 @@ impl WindowBackend {
         let Some(terminal) = &self.terminal else {
             return;
         };
-        let base_frame = self.render_cache.update(terminal.grid());
+        self.render_cache.update(terminal.grid());
 
         let Some(pixels) = &mut self.pixels else {
             return;
         };
 
         let frame = pixels.frame_mut();
-        frame.copy_from_slice(base_frame);
+        frame.copy_from_slice(&self.render_cache.frame);
         let now = Instant::now();
         let plugin_active = self.plugins.draw(&mut PluginFrame {
             frame,
@@ -431,7 +455,7 @@ impl WindowBackend {
             grid: terminal.grid(),
             now,
         });
-        draw_cursor_to_frame(terminal.grid(), frame);
+        self.render_cache.draw_cursor(terminal.grid(), frame);
         if let Err(error) = pixels.render() {
             eprintln!("c-term: GPU render failed: {error}");
         }
@@ -739,16 +763,6 @@ fn mouse_modifier_bits(modifiers: ModifiersState) -> u8 {
     bits
 }
 
-fn draw_grid_row_to_frame(grid: &Grid, frame: &mut [u8], width: usize, y: u16) {
-    let Some(row) = grid.row(y) else {
-        return;
-    };
-    for (x, cell) in row.iter().enumerate() {
-        let ch = if cell.spacer { ' ' } else { cell.ch };
-        draw_cell(frame, width, x as u16, y, ch, cell.style);
-    }
-}
-
 fn clear_grid_row(frame: &mut [u8], width: usize, y: u16) {
     let row_start = usize::from(y) * CELL_HEIGHT as usize * width * 4;
     let row_len = CELL_HEIGHT as usize * width * 4;
@@ -757,41 +771,255 @@ fn clear_grid_row(frame: &mut [u8], width: usize, y: u16) {
     }
 }
 
-fn draw_cursor_to_frame(grid: &Grid, frame: &mut [u8]) {
-    let cursor = grid.cursor();
-    if !cursor.visible {
-        return;
-    }
-    let Some(cell) = grid.cell(cursor.x, cursor.y) else {
-        return;
-    };
-    let width = usize::from(grid.width()) * CELL_WIDTH as usize;
-    let ch = if cell.spacer { ' ' } else { cell.ch };
-    draw_cell(frame, width, cursor.x, cursor.y, ch, cell.style);
-    draw_cursor_shape(frame, width, cursor.x, cursor.y, cursor.shape);
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct GlyphKey {
+    font: usize,
+    ch: char,
 }
 
-fn draw_cell(frame: &mut [u8], width: usize, cell_x: u16, cell_y: u16, ch: char, style: Style) {
-    let fg = rgb(style.foreground, [220, 224, 232]);
-    let bg = rgb(style.background, [16, 18, 24]);
-    if draw_box_cell(frame, width, cell_x, cell_y, ch, fg, bg) {
-        return;
+struct LoadedFont {
+    font: FontArc,
+    scale: PxScale,
+    ascent: f32,
+    height: f32,
+}
+
+struct GlyphBitmap {
+    left: i16,
+    top: i16,
+    width: u16,
+    height: u16,
+    alpha: Vec<u8>,
+}
+
+struct TextRenderer {
+    fonts: Vec<LoadedFont>,
+    glyphs: HashMap<GlyphKey, GlyphBitmap>,
+}
+
+impl TextRenderer {
+    fn new() -> Self {
+        Self {
+            fonts: load_fonts(),
+            glyphs: HashMap::new(),
+        }
     }
+
+    fn draw_grid_row_to_frame(&mut self, grid: &Grid, frame: &mut [u8], width: usize, y: u16) {
+        let Some(row) = grid.row(y) else {
+            return;
+        };
+        for (x, cell) in row.iter().enumerate() {
+            let ch = if cell.spacer { ' ' } else { cell.ch };
+            self.draw_cell(frame, width, x as u16, y, ch, cell.style);
+        }
+    }
+
+    fn draw_cell(
+        &mut self,
+        frame: &mut [u8],
+        width: usize,
+        cell_x: u16,
+        cell_y: u16,
+        ch: char,
+        style: Style,
+    ) {
+        let fg = rgb(style.foreground, [220, 224, 232]);
+        let bg = rgb(style.background, [16, 18, 24]);
+        if draw_box_cell(frame, width, cell_x, cell_y, ch, fg, bg) {
+            return;
+        }
+
+        fill_cell(frame, width, cell_x, cell_y, bg);
+        if ch != ' ' {
+            if let Some(key) = self.glyph_key(ch) {
+                self.ensure_glyph(key);
+                if let Some(glyph) = self.glyphs.get(&key) {
+                    draw_glyph_bitmap(frame, width, cell_x, cell_y, glyph, fg, 0);
+                    if style.bold {
+                        draw_glyph_bitmap(frame, width, cell_x, cell_y, glyph, fg, 1);
+                    }
+                }
+            } else {
+                draw_font8x8_cell(frame, width, cell_x, cell_y, ch, fg, bg);
+            }
+        }
+        if style.underline {
+            draw_underline(frame, width, cell_x, cell_y, fg);
+        }
+    }
+
+    fn glyph_key(&self, ch: char) -> Option<GlyphKey> {
+        self.font_index(ch)
+            .map(|font| GlyphKey { font, ch })
+            .or_else(|| self.font_index('?').map(|font| GlyphKey { font, ch: '?' }))
+    }
+
+    fn font_index(&self, ch: char) -> Option<usize> {
+        self.fonts
+            .iter()
+            .position(|font| font.font.glyph_id(ch) != GlyphId(0))
+    }
+
+    fn ensure_glyph(&mut self, key: GlyphKey) {
+        if self.glyphs.contains_key(&key) {
+            return;
+        }
+        let glyph = rasterize_glyph(&self.fonts[key.font], key.ch);
+        self.glyphs.insert(key, glyph);
+    }
+}
+
+fn load_fonts() -> Vec<LoadedFont> {
+    let mut paths = Vec::new();
+    paths.extend(env::var_os("TERMITE_FONT").and_then(|path| path.into_string().ok()));
+    paths.extend(env::var_os("C_TERM_FONT").and_then(|path| path.into_string().ok()));
+
+    let mut loaded = Vec::new();
+    for (index, path) in paths.iter().enumerate() {
+        if paths[..index].contains(path) {
+            continue;
+        }
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        let Ok(font) = FontArc::try_from_vec(bytes) else {
+            continue;
+        };
+        let scaled = font.as_scaled(FONT_SIZE);
+        let ascent = scaled.ascent();
+        let height = scaled.height();
+        loaded.push(LoadedFont {
+            font,
+            scale: PxScale::from(FONT_SIZE),
+            ascent,
+            height,
+        });
+    }
+    loaded
+}
+
+fn rasterize_glyph(font: &LoadedFont, ch: char) -> GlyphBitmap {
+    let scaled = font.font.as_scaled(font.scale);
+    let glyph_id = scaled.glyph_id(ch);
+    let advance = scaled.h_advance(glyph_id);
+    let x = ((CELL_WIDTH as f32 - advance) * 0.5).floor().max(-1.0);
+    let baseline = ((CELL_HEIGHT as f32 - font.height) * 0.5 + font.ascent).round();
+    let glyph = glyph_id.with_scale_and_position(font.scale, point(x, baseline));
+    let Some(outlined) = scaled.outline_glyph(glyph) else {
+        return GlyphBitmap {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+            alpha: Vec::new(),
+        };
+    };
+
+    let bounds = outlined.px_bounds();
+    let width = bounds.width().max(0.0) as u16;
+    let height = bounds.height().max(0.0) as u16;
+    let mut alpha = vec![0; usize::from(width) * usize::from(height)];
+    outlined.draw(|x, y, coverage| {
+        let index =
+            usize::try_from(y).unwrap_or(0) * usize::from(width) + usize::try_from(x).unwrap_or(0);
+        if let Some(alpha) = alpha.get_mut(index) {
+            *alpha = coverage.mul_add(255.0, 0.5).clamp(0.0, 255.0) as u8;
+        }
+    });
+
+    GlyphBitmap {
+        left: bounds.min.x.floor() as i16,
+        top: bounds.min.y.floor() as i16,
+        width,
+        height,
+        alpha,
+    }
+}
+
+fn fill_cell(frame: &mut [u8], width: usize, cell_x: u16, cell_y: u16, color: [u8; 3]) {
+    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
+    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
+    for py in 0..CELL_HEIGHT as usize {
+        for px in 0..CELL_WIDTH as usize {
+            let index = ((origin_y + py) * width + origin_x + px) * 4;
+            frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
+        }
+    }
+}
+
+fn draw_glyph_bitmap(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    glyph: &GlyphBitmap,
+    color: [u8; 3],
+    x_shift: i16,
+) {
+    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
+    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
+    for y in 0..glyph.height {
+        let cell_py = glyph.top + y as i16;
+        if !(0..CELL_HEIGHT as i16).contains(&cell_py) {
+            continue;
+        }
+        for x in 0..glyph.width {
+            let cell_px = glyph.left + x as i16 + x_shift;
+            if !(0..CELL_WIDTH as i16).contains(&cell_px) {
+                continue;
+            }
+            let alpha = glyph.alpha[usize::from(y) * usize::from(glyph.width) + usize::from(x)];
+            if alpha == 0 {
+                continue;
+            }
+            let index = ((origin_y + cell_py as usize) * width + origin_x + cell_px as usize) * 4;
+            blend_pixel(&mut frame[index..index + 4], color, alpha);
+        }
+    }
+}
+
+fn blend_pixel(pixel: &mut [u8], color: [u8; 3], alpha: u8) {
+    let alpha = u16::from(alpha);
+    let inv = 255 - alpha;
+    for (channel, color) in pixel[..3].iter_mut().zip(color) {
+        *channel = ((u16::from(*channel) * inv + u16::from(color) * alpha) / 255) as u8;
+    }
+    pixel[3] = 0xff;
+}
+
+fn draw_font8x8_cell(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    ch: char,
+    fg: [u8; 3],
+    bg: [u8; 3],
+) {
     let glyph = BASIC_FONTS
         .get(ch)
         .or_else(|| BASIC_FONTS.get('?'))
         .unwrap_or([0; 8]);
     let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
     let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
-
     for py in 0..CELL_HEIGHT as usize {
         let glyph_row = glyph[py / 2];
         for px in 0..CELL_WIDTH as usize {
-            let bit_set = ((glyph_row >> px) & 1) != 0;
-            let color = if bit_set { fg } else { bg };
+            let color = if ((glyph_row >> px) & 1) != 0 { fg } else { bg };
             let index = ((origin_y + py) * width + origin_x + px) * 4;
             frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
         }
+    }
+}
+
+fn draw_underline(frame: &mut [u8], width: usize, cell_x: u16, cell_y: u16, color: [u8; 3]) {
+    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
+    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
+    let y = origin_y + CELL_HEIGHT as usize - 2;
+    for px in 0..CELL_WIDTH as usize {
+        let index = (y * width + origin_x + px) * 4;
+        frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
     }
 }
 

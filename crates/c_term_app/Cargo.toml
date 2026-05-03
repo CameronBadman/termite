@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+ab_glyph = "0.2.32"
 c_term_core = { path = "../c_term_core" }
 font8x8 = "0.3.1"
 nix = { version = "0.31.2", features = ["fs", "process", "term"] }
