@@ -355,43 +355,43 @@ impl CursorTrail {
             let age = frame.now.duration_since(trail.started);
             let raw = (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
             let progress = ease_out_quart(raw);
-            let fade = (1.0 - raw).powf(0.55);
-            let start = (progress - self.config.length * (0.72 + 0.28 * fade)).max(0.0);
+            let fade = (1.0 - raw).powf(0.75);
+            let start = (progress - self.config.length).max(0.0);
             let tail = cursor_point(trail.from, trail.to, start);
             let head = cursor_point(trail.from, trail.to, progress);
             if progress > start {
-                let dark_alpha = (70.0 * fade) as u8;
-                let rim_alpha = (170.0 * fade) as u8;
-                let core_alpha = (185.0 * fade) as u8;
+                let dark_alpha = (52.0 * fade) as u8;
+                let rim_alpha = (190.0 * fade) as u8;
+                let core_alpha = (210.0 * fade) as u8;
                 frame.blend_capsule(
                     tail,
                     head,
-                    CELL_HEIGHT as f32 * 0.30,
+                    CELL_HEIGHT as f32 * 0.20,
                     [4, 8, 12],
                     dark_alpha,
                 );
-                frame.blend_capsule_ring(tail, head, CELL_HEIGHT as f32 * 0.28, edge, rim_alpha);
+                frame.blend_capsule_ring(tail, head, CELL_HEIGHT as f32 * 0.18, edge, rim_alpha);
                 frame.blend_capsule(
                     tail,
                     head,
-                    CELL_HEIGHT as f32 * 0.15,
+                    CELL_HEIGHT as f32 * 0.075,
                     self.config.color,
                     core_alpha,
                 );
                 frame.blend_capsule(
                     tail,
                     head,
-                    CELL_HEIGHT as f32 * 0.045,
+                    CELL_HEIGHT as f32 * 0.026,
                     hot,
-                    (105.0 * fade) as u8,
+                    (130.0 * fade) as u8,
                 );
             }
             let (x, y) = cursor_point(trail.from, trail.to, progress);
-            frame.blend_cursor_glow(x, y, 1.28, self.config.color, (38.0 * fade) as u8);
-            frame.blend_cursor_edge(x, y, 1.18, [4, 8, 12], (70.0 * fade) as u8);
-            frame.blend_cursor_edge(x, y, 1.06, edge, (150.0 * fade) as u8);
-            frame.blend_cursor_at(x, y, 0.96, self.config.color, (235.0 * fade) as u8);
-            frame.blend_cursor_at(x, y, 0.42, hot, (180.0 * fade) as u8);
+            frame.blend_cursor_glow(x, y, 0.92, self.config.color, (24.0 * fade) as u8);
+            frame.blend_cursor_edge(x, y, 0.92, [4, 8, 12], (54.0 * fade) as u8);
+            frame.blend_cursor_edge(x, y, 0.78, edge, (145.0 * fade) as u8);
+            frame.blend_cursor_at(x, y, 0.68, self.config.color, (240.0 * fade) as u8);
+            frame.blend_cursor_at(x, y, 0.24, hot, (210.0 * fade) as u8);
         }
     }
 }
@@ -496,7 +496,7 @@ mod tests {
             hold_ms: 0,
             decay_ms: 300,
             threshold: 2,
-            length: 0.82,
+            length: 1.0,
             color: [255, 0, 0],
         };
         let mut terminal = TerminalCore::new(4, 1);
