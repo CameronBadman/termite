@@ -1,5 +1,4 @@
 use std::{
-    env,
     error::Error,
     io::{self, Read, Write},
     os::fd::AsRawFd,
@@ -8,13 +7,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use c_term_core::{Color, Grid, Style, TerminalCore};
+use c_term_core::{
+    Color, CursorShape, DamageBatch, DamageRegion, Grid, MouseState, MouseTracking, Style,
+    TerminalCore,
+};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalSize},
-    event::{ElementState, KeyEvent, WindowEvent},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
+    event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
@@ -22,30 +24,31 @@ use winit::{
 
 use crate::{PtyChild, set_pty_winsize, spawn_shell};
 use crate::{
-    config::AppConfig,
     plugins::{PluginFrame, PluginHost},
+    runner::Runner,
 };
 
 pub(crate) const CELL_WIDTH: u32 = 8;
 pub(crate) const CELL_HEIGHT: u32 = 16;
-const ANIMATION_FRAME_MS: u64 = 2;
+const ANIMATION_FRAME_MS: u64 = 8;
+const DELAYED_RENDER_LOWER_US: u64 = 150;
+const DELAYED_RENDER_UPPER_NS: u64 = 4_000_000;
+const APP_SYNC_TIMEOUT_MS: u64 = 1_000;
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 540;
 
 #[derive(Debug)]
 enum UserEvent {
     PtyBytes(Vec<u8>),
-    AnimationFrame,
     ChildExited,
 }
 
-pub(crate) fn run() -> Result<(), Box<dyn Error>> {
+pub(crate) fn run(runner: Runner) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let config = AppConfig::load();
-    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-    let mut state = WindowBackend::new(shell, event_loop.create_proxy(), config);
+    let (shell, plugins) = runner.into_parts();
+    let mut state = WindowBackend::new(shell, event_loop.create_proxy(), plugins);
     event_loop.run_app(&mut state)?;
     Ok(())
 }
@@ -61,23 +64,117 @@ struct WindowBackend {
     modifiers: ModifiersState,
     cols: u16,
     rows: u16,
-    animation_queued: bool,
+    render_cache: RenderCache,
+    mouse_buttons: u8,
+    mouse_position: Option<(u16, u16)>,
+    animation_deadline: Option<Instant>,
+    render_lower_deadline: Option<Instant>,
+    render_upper_deadline: Option<Instant>,
+    app_sync_deadline: Option<Instant>,
+    redraw_pending: bool,
+}
+
+struct RenderCache {
+    frame: Vec<u8>,
+    dirty_rows: Vec<bool>,
+    dirty: bool,
+}
+
+impl RenderCache {
+    fn new() -> Self {
+        Self {
+            frame: Vec::new(),
+            dirty_rows: Vec::new(),
+            dirty: true,
+        }
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) {
+        self.frame = vec![0; frame_len(cols, rows)];
+        self.dirty_rows = vec![false; usize::from(rows)];
+        self.dirty = true;
+    }
+
+    fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    fn apply_damage(&mut self, damage: &DamageBatch, rows: u16) {
+        for region in &damage.regions {
+            match *region {
+                DamageRegion::Viewport => self.invalidate(),
+                DamageRegion::Cells { y, height, .. } => {
+                    let end = y.saturating_add(height).min(rows);
+                    for row in y..end {
+                        if let Some(dirty) = self.dirty_rows.get_mut(usize::from(row)) {
+                            *dirty = true;
+                        }
+                    }
+                }
+                DamageRegion::Cursor { .. } => {}
+            }
+        }
+    }
+
+    fn update(&mut self, grid: &Grid) -> &[u8] {
+        let expected_len = frame_len(grid.width(), grid.height());
+        if self.frame.len() != expected_len {
+            self.frame.resize(expected_len, 0);
+            self.dirty = true;
+        }
+        if self.dirty_rows.len() != usize::from(grid.height()) {
+            self.dirty_rows.resize(usize::from(grid.height()), true);
+            self.dirty = true;
+        }
+
+        let width = usize::from(grid.width()) * CELL_WIDTH as usize;
+        if self.dirty {
+            self.frame.fill(0);
+            for y in 0..grid.height() {
+                draw_grid_row_to_frame(grid, &mut self.frame, width, y);
+            }
+            self.dirty_rows.fill(false);
+            self.dirty = false;
+            return &self.frame;
+        }
+
+        for y in 0..grid.height() {
+            let Some(dirty) = self.dirty_rows.get_mut(usize::from(y)) else {
+                continue;
+            };
+            if !*dirty {
+                continue;
+            }
+            clear_grid_row(&mut self.frame, width, y);
+            draw_grid_row_to_frame(grid, &mut self.frame, width, y);
+            *dirty = false;
+        }
+
+        &self.frame
+    }
 }
 
 impl WindowBackend {
-    fn new(shell: String, proxy: EventLoopProxy<UserEvent>, config: AppConfig) -> Self {
+    fn new(shell: String, proxy: EventLoopProxy<UserEvent>, plugins: PluginHost) -> Self {
         Self {
             shell,
             proxy,
             window: None,
             pixels: None,
             terminal: None,
-            plugins: PluginHost::from_config(&config),
+            plugins,
             child: None,
             modifiers: ModifiersState::empty(),
             cols: 1,
             rows: 1,
-            animation_queued: false,
+            render_cache: RenderCache::new(),
+            mouse_buttons: 0,
+            mouse_position: None,
+            animation_deadline: None,
+            render_lower_deadline: None,
+            render_upper_deadline: None,
+            app_sync_deadline: None,
+            redraw_pending: false,
         }
     }
 
@@ -105,6 +202,7 @@ impl WindowBackend {
 
         self.cols = cols;
         self.rows = rows;
+        self.render_cache.resize(cols, rows);
         self.terminal = Some(TerminalCore::new(cols, rows));
         self.pixels = Some(pixels);
         self.child = Some(child);
@@ -114,34 +212,60 @@ impl WindowBackend {
     }
 
     fn mark_dirty(&mut self) {
-        if let Some(window) = &self.window {
+        if !self.redraw_pending
+            && let Some(window) = &self.window
+        {
+            self.redraw_pending = true;
             window.request_redraw();
         }
     }
 
-    fn schedule_animation(&mut self) {
-        if self.animation_queued {
-            return;
+    fn schedule_animation(&mut self, now: Instant) {
+        self.animation_deadline = Some(now + Duration::from_millis(ANIMATION_FRAME_MS));
+    }
+
+    fn schedule_delayed_render(&mut self, now: Instant) {
+        self.render_lower_deadline = Some(now + Duration::from_micros(DELAYED_RENDER_LOWER_US));
+        if self.render_upper_deadline.is_none() {
+            self.render_upper_deadline = Some(now + Duration::from_nanos(DELAYED_RENDER_UPPER_NS));
         }
-        self.animation_queued = true;
-        let proxy = self.proxy.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(ANIMATION_FRAME_MS));
-            let _ = proxy.send_event(UserEvent::AnimationFrame);
-        });
+    }
+
+    fn disarm_delayed_render(&mut self) {
+        self.render_lower_deadline = None;
+        self.render_upper_deadline = None;
+    }
+
+    fn apply_damage(&mut self, damage: &DamageBatch) {
+        self.render_cache.apply_damage(damage, self.rows);
     }
 
     fn handle_pty_bytes(&mut self, bytes: Vec<u8>) {
         let Some(terminal) = &mut self.terminal else {
             return;
         };
-        if !terminal.process_pty_input(&bytes).is_idle() {
-            self.mark_dirty();
+        let tick = terminal.process_pty_input(&bytes);
+        let synchronized = terminal.grid().is_synchronized();
+        let output = tick.output;
+        self.apply_damage(&tick.damage);
+        let now = Instant::now();
+        if synchronized {
+            self.disarm_delayed_render();
+            self.app_sync_deadline = Some(now + Duration::from_millis(APP_SYNC_TIMEOUT_MS));
+        } else {
+            self.app_sync_deadline = None;
+            self.schedule_delayed_render(now);
+        }
+        if !output.is_empty()
+            && let Some(child) = &mut self.child
+            && let Err(error) = child.master.write_all(&output)
+        {
+            eprintln!("c-term: failed to write terminal response to PTY: {error}");
         }
     }
 
     fn handle_resize(&mut self, size: PhysicalSize<u32>) {
-        let Some(pixels) = &mut self.pixels else {
+        let Some(pixels) = self.pixels.as_mut() else {
             return;
         };
 
@@ -165,15 +289,20 @@ impl WindowBackend {
         }
 
         if let Some(terminal) = &mut self.terminal {
-            let _ = terminal.resize(cols, rows);
+            let tick = terminal.resize(cols, rows);
+            self.apply_damage(&tick.damage);
         }
 
+        let Some(pixels) = self.pixels.as_mut() else {
+            return;
+        };
         if let Err(error) = pixels.resize_buffer(buffer_width(cols), buffer_height(rows)) {
             eprintln!("c-term: failed to resize GPU buffer: {error}");
         }
 
         self.cols = cols;
         self.rows = rows;
+        self.render_cache.resize(cols, rows);
         self.mark_dirty();
     }
 
@@ -199,13 +328,102 @@ impl WindowBackend {
         }
     }
 
+    fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        let Some(cell) = self.mouse_position else {
+            return;
+        };
+        let Some(button_code) = mouse_button_code(button) else {
+            return;
+        };
+
+        match state {
+            ElementState::Pressed => self.mouse_buttons |= 1 << button_code,
+            ElementState::Released => self.mouse_buttons &= !(1 << button_code),
+        }
+
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+        let mouse = terminal.mouse();
+        if mouse.tracking == MouseTracking::None {
+            return;
+        }
+
+        let code = if state == ElementState::Pressed {
+            button_code
+        } else {
+            3
+        };
+        self.write_mouse_event(mouse, code, cell, state == ElementState::Released);
+    }
+
+    fn handle_mouse_move(&mut self, position: PhysicalPosition<f64>) {
+        let Some(cell) = mouse_cell(position, self.cols, self.rows) else {
+            self.mouse_position = None;
+            return;
+        };
+        if self.mouse_position == Some(cell) {
+            return;
+        }
+        self.mouse_position = Some(cell);
+
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+        let mouse = terminal.mouse();
+        let code = match mouse.tracking {
+            MouseTracking::Any => 35,
+            MouseTracking::Drag if self.mouse_buttons != 0 => {
+                active_mouse_button(self.mouse_buttons) + 32
+            }
+            _ => return,
+        };
+        self.write_mouse_event(mouse, code, cell, false);
+    }
+
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let Some(cell) = self.mouse_position else {
+            return;
+        };
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+        let mouse = terminal.mouse();
+        if mouse.tracking == MouseTracking::None {
+            return;
+        }
+
+        for code in wheel_codes(delta) {
+            self.write_mouse_event(mouse, code, cell, false);
+        }
+    }
+
+    fn write_mouse_event(&mut self, mouse: MouseState, code: u8, cell: (u16, u16), release: bool) {
+        let bytes = encode_mouse_event(mouse, code, cell.0, cell.1, self.modifiers, release);
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(child) = &mut self.child
+            && let Err(error) = child.master.write_all(&bytes)
+        {
+            eprintln!("c-term: failed to write mouse event to PTY: {error}");
+        }
+    }
+
     fn render(&mut self) {
-        let (Some(terminal), Some(pixels)) = (&self.terminal, &mut self.pixels) else {
+        self.redraw_pending = false;
+        self.disarm_delayed_render();
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+        let base_frame = self.render_cache.update(terminal.grid());
+
+        let Some(pixels) = &mut self.pixels else {
             return;
         };
 
         let frame = pixels.frame_mut();
-        draw_grid_to_frame(terminal.grid(), frame);
+        frame.copy_from_slice(base_frame);
         let now = Instant::now();
         let plugin_active = self.plugins.draw(&mut PluginFrame {
             frame,
@@ -213,12 +431,68 @@ impl WindowBackend {
             grid: terminal.grid(),
             now,
         });
+        draw_cursor_to_frame(terminal.grid(), frame);
         if let Err(error) = pixels.render() {
             eprintln!("c-term: GPU render failed: {error}");
         }
         if plugin_active {
-            self.schedule_animation();
+            self.schedule_animation(now);
+        } else {
+            self.animation_deadline = None;
         }
+    }
+
+    fn timers_if_due(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+
+        if self
+            .app_sync_deadline
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.app_sync_deadline = None;
+            if let Some(terminal) = &mut self.terminal {
+                terminal.disable_synchronized_update();
+            }
+            self.render_cache.invalidate();
+            self.mark_dirty();
+        }
+
+        let render_due = self
+            .render_lower_deadline
+            .is_some_and(|deadline| deadline <= now)
+            || self
+                .render_upper_deadline
+                .is_some_and(|deadline| deadline <= now);
+        if render_due {
+            self.disarm_delayed_render();
+            self.mark_dirty();
+        }
+
+        if self
+            .animation_deadline
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.animation_deadline = None;
+            self.mark_dirty();
+        }
+
+        if let Some(deadline) = self.next_deadline() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        [
+            self.animation_deadline,
+            self.render_lower_deadline,
+            self.render_upper_deadline,
+            self.app_sync_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 }
 
@@ -233,12 +507,12 @@ impl ApplicationHandler<UserEvent> for WindowBackend {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyBytes(bytes) => self.handle_pty_bytes(bytes),
-            UserEvent::AnimationFrame => {
-                self.animation_queued = false;
-                self.mark_dirty();
-            }
             UserEvent::ChildExited => event_loop.exit(),
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.timers_if_due(event_loop);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -246,6 +520,11 @@ impl ApplicationHandler<UserEvent> for WindowBackend {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => self.handle_resize(size),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::CursorMoved { position, .. } => self.handle_mouse_move(position),
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.handle_mouse_input(state, button);
+            }
+            WindowEvent::MouseWheel { delta, .. } => self.handle_mouse_wheel(delta),
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic: false,
@@ -293,6 +572,10 @@ fn buffer_width(cols: u16) -> u32 {
 
 fn buffer_height(rows: u16) -> u32 {
     u32::from(rows) * CELL_HEIGHT
+}
+
+fn frame_len(cols: u16, rows: u16) -> usize {
+    buffer_width(cols) as usize * buffer_height(rows) as usize * 4
 }
 
 fn encode_window_key(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
@@ -359,39 +642,141 @@ fn ctrl_byte(ch: char) -> Option<u8> {
     }
 }
 
-fn draw_grid_to_frame(grid: &Grid, frame: &mut [u8]) {
-    let width = usize::from(grid.width()) * CELL_WIDTH as usize;
-    frame.fill(0);
+fn mouse_cell(position: PhysicalPosition<f64>, cols: u16, rows: u16) -> Option<(u16, u16)> {
+    if position.x < 0.0 || position.y < 0.0 {
+        return None;
+    }
+    let x = (position.x as u32 / CELL_WIDTH) as u16;
+    let y = (position.y as u32 / CELL_HEIGHT) as u16;
+    (x < cols && y < rows).then_some((x, y))
+}
 
-    for y in 0..grid.height() {
-        for x in 0..grid.width() {
-            let Some(cell) = grid.cell(x, y) else {
-                continue;
-            };
-            draw_cell(
-                frame,
-                width,
-                x,
-                y,
-                cell.ch,
-                cell.style,
-                grid.cursor().visible && grid.cursor().x == x && grid.cursor().y == y,
-            );
+fn mouse_button_code(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
+fn active_mouse_button(buttons: u8) -> u8 {
+    for button in 0..3 {
+        if buttons & (1 << button) != 0 {
+            return button;
+        }
+    }
+    3
+}
+
+fn wheel_codes(delta: MouseScrollDelta) -> Vec<u8> {
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => wheel_axis_codes(x, y),
+        MouseScrollDelta::PixelDelta(position) => {
+            wheel_axis_codes(position.x as f32, position.y as f32)
         }
     }
 }
 
-fn draw_cell(
-    frame: &mut [u8],
-    width: usize,
-    cell_x: u16,
-    cell_y: u16,
-    ch: char,
-    style: Style,
-    cursor: bool,
-) {
+fn wheel_axis_codes(x: f32, y: f32) -> Vec<u8> {
+    let mut codes = Vec::new();
+    if y > 0.0 {
+        codes.push(64);
+    } else if y < 0.0 {
+        codes.push(65);
+    }
+    if x > 0.0 {
+        codes.push(67);
+    } else if x < 0.0 {
+        codes.push(66);
+    }
+    codes
+}
+
+fn encode_mouse_event(
+    mouse: MouseState,
+    code: u8,
+    x: u16,
+    y: u16,
+    modifiers: ModifiersState,
+    release: bool,
+) -> Vec<u8> {
+    if mouse.tracking == MouseTracking::None {
+        return Vec::new();
+    }
+
+    let code = code + mouse_modifier_bits(modifiers);
+    let col = x.saturating_add(1);
+    let row = y.saturating_add(1);
+    if mouse.sgr {
+        let final_byte = if release { 'm' } else { 'M' };
+        format!("\x1b[<{code};{col};{row}{final_byte}").into_bytes()
+    } else {
+        let Ok(code) = u8::try_from(u16::from(code) + 32) else {
+            return Vec::new();
+        };
+        let Ok(col) = u8::try_from(col.saturating_add(32)) else {
+            return Vec::new();
+        };
+        let Ok(row) = u8::try_from(row.saturating_add(32)) else {
+            return Vec::new();
+        };
+        vec![0x1b, b'[', b'M', code, col, row]
+    }
+}
+
+fn mouse_modifier_bits(modifiers: ModifiersState) -> u8 {
+    let mut bits = 0;
+    if modifiers.shift_key() {
+        bits |= 4;
+    }
+    if modifiers.alt_key() {
+        bits |= 8;
+    }
+    if modifiers.control_key() {
+        bits |= 16;
+    }
+    bits
+}
+
+fn draw_grid_row_to_frame(grid: &Grid, frame: &mut [u8], width: usize, y: u16) {
+    let Some(row) = grid.row(y) else {
+        return;
+    };
+    for (x, cell) in row.iter().enumerate() {
+        let ch = if cell.spacer { ' ' } else { cell.ch };
+        draw_cell(frame, width, x as u16, y, ch, cell.style);
+    }
+}
+
+fn clear_grid_row(frame: &mut [u8], width: usize, y: u16) {
+    let row_start = usize::from(y) * CELL_HEIGHT as usize * width * 4;
+    let row_len = CELL_HEIGHT as usize * width * 4;
+    if let Some(row) = frame.get_mut(row_start..row_start + row_len) {
+        row.fill(0);
+    }
+}
+
+fn draw_cursor_to_frame(grid: &Grid, frame: &mut [u8]) {
+    let cursor = grid.cursor();
+    if !cursor.visible {
+        return;
+    }
+    let Some(cell) = grid.cell(cursor.x, cursor.y) else {
+        return;
+    };
+    let width = usize::from(grid.width()) * CELL_WIDTH as usize;
+    let ch = if cell.spacer { ' ' } else { cell.ch };
+    draw_cell(frame, width, cursor.x, cursor.y, ch, cell.style);
+    draw_cursor_shape(frame, width, cursor.x, cursor.y, cursor.shape);
+}
+
+fn draw_cell(frame: &mut [u8], width: usize, cell_x: u16, cell_y: u16, ch: char, style: Style) {
     let fg = rgb(style.foreground, [220, 224, 232]);
     let bg = rgb(style.background, [16, 18, 24]);
+    if draw_box_cell(frame, width, cell_x, cell_y, ch, fg, bg) {
+        return;
+    }
     let glyph = BASIC_FONTS
         .get(ch)
         .or_else(|| BASIC_FONTS.get('?'))
@@ -403,17 +788,95 @@ fn draw_cell(
         let glyph_row = glyph[py / 2];
         for px in 0..CELL_WIDTH as usize {
             let bit_set = ((glyph_row >> px) & 1) != 0;
-            let mut color = if bit_set { fg } else { bg };
-            if cursor {
-                color = [255 - color[0], 255 - color[1], 255 - color[2]];
-            }
+            let color = if bit_set { fg } else { bg };
             let index = ((origin_y + py) * width + origin_x + px) * 4;
             frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
         }
     }
 }
 
-fn rgb(color: Color, fallback: [u8; 3]) -> [u8; 3] {
+fn draw_box_cell(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    ch: char,
+    fg: [u8; 3],
+    bg: [u8; 3],
+) -> bool {
+    let Some((left, right, up, down)) = box_segments(ch) else {
+        return false;
+    };
+    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
+    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
+    let center_x = CELL_WIDTH as usize / 2;
+    let center_y = CELL_HEIGHT as usize / 2;
+    let thickness = 2;
+
+    for py in 0..CELL_HEIGHT as usize {
+        for px in 0..CELL_WIDTH as usize {
+            let horizontal = py.abs_diff(center_y) < thickness
+                && ((left && px <= center_x) || (right && px >= center_x));
+            let vertical = px.abs_diff(center_x) < thickness
+                && ((up && py <= center_y) || (down && py >= center_y));
+            let color = if horizontal || vertical { fg } else { bg };
+            let index = ((origin_y + py) * width + origin_x + px) * 4;
+            frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
+        }
+    }
+    true
+}
+
+fn box_segments(ch: char) -> Option<(bool, bool, bool, bool)> {
+    match ch {
+        '─' | '━' | '╌' | '╍' | '⎺' | '⎻' | '⎼' | '⎽' => {
+            Some((true, true, false, false))
+        }
+        '╴' => Some((true, false, false, false)),
+        '╶' => Some((false, true, false, false)),
+        '│' | '┃' | '╎' | '╏' | '┆' | '┇' | '┊' | '┋' => {
+            Some((false, false, true, true))
+        }
+        '╵' => Some((false, false, true, false)),
+        '╷' => Some((false, false, false, true)),
+        '┌' | '┏' | '╭' => Some((false, true, false, true)),
+        '┐' | '┓' | '╮' => Some((true, false, false, true)),
+        '└' | '┗' | '╰' => Some((false, true, true, false)),
+        '┘' | '┛' | '╯' => Some((true, false, true, false)),
+        '├' | '┣' => Some((false, true, true, true)),
+        '┤' | '┫' => Some((true, false, true, true)),
+        '┬' | '┳' => Some((true, true, false, true)),
+        '┴' | '┻' => Some((true, true, true, false)),
+        '┼' | '╋' => Some((true, true, true, true)),
+        _ => None,
+    }
+}
+
+fn draw_cursor_shape(frame: &mut [u8], width: usize, cell_x: u16, cell_y: u16, shape: CursorShape) {
+    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
+    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
+    let (x_start, y_start, cursor_width, cursor_height) = match shape {
+        CursorShape::Block => (0, 0, CELL_WIDTH as usize, CELL_HEIGHT as usize),
+        CursorShape::Beam => (0, 0, (CELL_WIDTH as usize / 4).max(1), CELL_HEIGHT as usize),
+        CursorShape::Underline => (
+            0,
+            CELL_HEIGHT as usize - (CELL_HEIGHT as usize / 5).max(1),
+            CELL_WIDTH as usize,
+            (CELL_HEIGHT as usize / 5).max(1),
+        ),
+    };
+
+    for py in y_start..y_start + cursor_height {
+        for px in x_start..x_start + cursor_width {
+            let index = ((origin_y + py) * width + origin_x + px) * 4;
+            for channel in &mut frame[index..index + 3] {
+                *channel = 255 - *channel;
+            }
+        }
+    }
+}
+
+pub(crate) fn rgb(color: Color, fallback: [u8; 3]) -> [u8; 3] {
     match color {
         Color::DefaultForeground | Color::DefaultBackground => fallback,
         Color::Indexed(index) => ANSI_COLORS
@@ -442,3 +905,95 @@ const ANSI_COLORS: [[u8; 3]; 16] = [
     [97, 214, 214],
     [242, 242, 242],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use c_term_core::TerminalCore;
+
+    #[test]
+    fn box_drawing_characters_are_drawn_without_font_fallback() {
+        let width = CELL_WIDTH as usize;
+        let mut frame = vec![0; width * CELL_HEIGHT as usize * 4];
+
+        assert!(draw_box_cell(
+            &mut frame,
+            width,
+            0,
+            0,
+            '─',
+            [220, 224, 232],
+            [16, 18, 24],
+        ));
+
+        let center_y = CELL_HEIGHT as usize / 2;
+        let center_index = (center_y * width + width / 2) * 4;
+        assert_eq!(&frame[center_index..center_index + 3], &[220, 224, 232]);
+        assert!(
+            frame
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == [16, 18, 24])
+        );
+    }
+
+    #[test]
+    fn non_box_characters_use_font_path() {
+        assert_eq!(box_segments('A'), None);
+    }
+
+    #[test]
+    fn base_frame_cache_updates_only_dirty_rows() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let _ = terminal.process_pty_input(b"A\x1b[2;1HB");
+        let mut cache = RenderCache::new();
+
+        let frame = cache.update(terminal.grid());
+        let first_row = frame[..CELL_HEIGHT as usize * 4 * CELL_WIDTH as usize * 4].to_vec();
+
+        let tick = terminal.process_pty_input(b"\x1b[2;2HC");
+        cache.apply_damage(&tick.damage, terminal.grid().height());
+        let frame = cache.update(terminal.grid());
+
+        assert_eq!(
+            &frame[..CELL_HEIGHT as usize * 4 * CELL_WIDTH as usize * 4],
+            first_row.as_slice()
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_encoding_uses_one_based_coordinates() {
+        let mouse = MouseState {
+            tracking: MouseTracking::Click,
+            sgr: true,
+        };
+
+        assert_eq!(
+            encode_mouse_event(mouse, 0, 2, 3, ModifiersState::empty(), false),
+            b"\x1b[<0;3;4M"
+        );
+        assert_eq!(
+            encode_mouse_event(mouse, 0, 2, 3, ModifiersState::empty(), true),
+            b"\x1b[<0;3;4m"
+        );
+    }
+
+    #[test]
+    fn mouse_encoding_includes_modifiers() {
+        let mouse = MouseState {
+            tracking: MouseTracking::Click,
+            sgr: true,
+        };
+
+        assert_eq!(
+            encode_mouse_event(
+                mouse,
+                64,
+                0,
+                0,
+                ModifiersState::SHIFT | ModifiersState::CONTROL,
+                false,
+            ),
+            b"\x1b[<84;1;1M"
+        );
+    }
+}
