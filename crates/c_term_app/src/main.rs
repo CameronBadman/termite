@@ -1,4 +1,4 @@
-use std::{ffi::CString, fs::File, io, os::fd::RawFd};
+use std::{env, ffi::CString, fs::File, io, os::fd::RawFd};
 
 mod config;
 mod plugins;
@@ -34,6 +34,9 @@ pub(crate) fn spawn_shell(shell: &str, cols: u16, rows: u16) -> io::Result<PtyCh
             master: File::from(master),
         }),
         ForkptyResult::Child => {
+            unsafe {
+                env::set_var("TERM", "xterm-256color");
+            }
             let shell = CString::new(shell).unwrap_or_else(|_| CString::new("/bin/sh").unwrap());
             let _ = execvp(&shell, &[shell.as_c_str()]);
             std::process::exit(127);

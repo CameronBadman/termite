@@ -87,6 +87,7 @@ where
                     let _ = self.grid.move_cursor(cursor.x - 1, cursor.y);
                 }
             }
+            ParserAction::Reset => self.reset(),
             ParserAction::SaveCursor => self.saved_cursor = Some(self.grid.cursor()),
             ParserAction::RestoreCursor => {
                 if let Some(cursor) = self.saved_cursor {
@@ -152,6 +153,15 @@ where
         }
     }
 
+    fn reset(&mut self) {
+        let width = self.grid.width();
+        let height = self.grid.height();
+        self.grid = Grid::new(width, height);
+        self.alternate_grid = None;
+        self.style = Style::default();
+        self.saved_cursor = None;
+    }
+
     fn tick(&mut self) -> CoreTick {
         CoreTick {
             damage: self.grid.drain_damage(),
@@ -179,6 +189,36 @@ mod tests {
         assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
         assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'b');
         assert!(!tick.damage.is_empty());
+    }
+
+    #[test]
+    fn clear_command_sequence_clears_visible_screen() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let tick = terminal.process_pty_input(b"ab\x1b[2;1Hcd\x1b[H\x1b[J");
+
+        assert_eq!(row_text(terminal.grid(), 0), "    ");
+        assert_eq!(row_text(terminal.grid(), 1), "    ");
+        assert!(!tick.damage.is_empty());
+    }
+
+    #[test]
+    fn full_clear_sequence_clears_visible_screen() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let _ = terminal.process_pty_input(b"ab\x1b[2;1Hcd\x1b[H\x1b[2J\x1b[3J");
+
+        assert_eq!(row_text(terminal.grid(), 0), "    ");
+        assert_eq!(row_text(terminal.grid(), 1), "    ");
+    }
+
+    #[test]
+    fn reset_sequence_resets_screen_and_cursor() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let _ = terminal.process_pty_input(b"ab\x1b[2;3Hcd\x1bc");
+
+        assert_eq!(row_text(terminal.grid(), 0), "    ");
+        assert_eq!(row_text(terminal.grid(), 1), "    ");
+        assert_eq!(terminal.grid().cursor().x, 0);
+        assert_eq!(terminal.grid().cursor().y, 0);
     }
 
     #[test]

@@ -5,6 +5,7 @@ pub enum ParserAction {
     LineFeed,
     CarriageReturn,
     Backspace,
+    Reset,
     MoveCursor { x: u16, y: u16 },
     MoveCursorRelative { dx: i16, dy: i16 },
     SaveCursor,
@@ -174,6 +175,7 @@ impl vte::Perform for ActionPerformer<'_> {
             return;
         }
         match byte {
+            b'c' => self.actions.push(ParserAction::Reset),
             b'7' => self.actions.push(ParserAction::SaveCursor),
             b'8' => self.actions.push(ParserAction::RestoreCursor),
             b'M' => self.actions.push(ParserAction::ReverseIndex),
