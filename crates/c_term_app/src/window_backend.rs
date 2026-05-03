@@ -324,6 +324,8 @@ fn encode_window_key(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<
             }
         }
         Key::Character(ch) => bytes.extend_from_slice(ch.as_bytes()),
+        Key::Named(NamedKey::Space) if modifiers.control_key() => bytes.push(0x00),
+        Key::Named(NamedKey::Space) => bytes.push(b' '),
         Key::Named(NamedKey::Enter) => bytes.push(b'\r'),
         Key::Named(NamedKey::Backspace) => bytes.push(0x7f),
         Key::Named(NamedKey::Tab) => bytes.push(b'\t'),
@@ -350,6 +352,7 @@ fn ctrl_byte(ch: char) -> Option<u8> {
         Some((lower as u8) - b'a' + 1)
     } else {
         match lower {
+            ' ' | '@' | '2' => Some(0x00),
             '[' => Some(0x1b),
             '\\' => Some(0x1c),
             ']' => Some(0x1d),

@@ -342,6 +342,7 @@ fn ctrl_byte(ch: char) -> Option<u8> {
         Some((lower as u8) - b'a' + 1)
     } else {
         match lower {
+            ' ' | '@' | '2' => Some(0x00),
             '[' => Some(0x1b),
             '\\' => Some(0x1c),
             ']' => Some(0x1d),
