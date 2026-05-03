@@ -34,16 +34,14 @@ impl PluginFrame<'_> {
         color: [u8; 3],
         alpha: u8,
     ) {
-        let width = (CELL_WIDTH as f32 * scale).round().max(2.0) as usize;
-        let height = (CELL_HEIGHT as f32 * scale).round().max(4.0) as usize;
-        self.blend_rect(
-            (x - width as f32 * 0.5).round().max(0.0) as usize,
-            (y - height as f32 * 0.5).round().max(0.0) as usize,
-            width,
-            height,
+        self.blend_ellipse(
+            x,
+            y,
+            CELL_WIDTH as f32 * 0.55 * scale,
+            CELL_HEIGHT as f32 * 0.58 * scale,
             color,
             alpha,
-        );
+        )
     }
 
     pub(crate) fn blend_cursor_glow(
@@ -54,14 +52,14 @@ impl PluginFrame<'_> {
         color: [u8; 3],
         alpha: u8,
     ) {
-        self.blend_rect(
-            (x - CELL_WIDTH as f32 * scale * 0.7).round().max(0.0) as usize,
-            (y - CELL_HEIGHT as f32 * scale * 0.7).round().max(0.0) as usize,
-            (CELL_WIDTH as f32 * scale * 1.4).round().max(3.0) as usize,
-            (CELL_HEIGHT as f32 * scale * 1.4).round().max(5.0) as usize,
+        self.blend_ellipse(
+            x,
+            y,
+            CELL_WIDTH as f32 * scale,
+            CELL_HEIGHT as f32 * scale,
             color,
             alpha,
-        );
+        )
     }
 
     pub(crate) fn blend_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
@@ -99,6 +97,41 @@ impl PluginFrame<'_> {
                         + (u16::from(*channel) * alpha))
                         / 255) as u8;
                 }
+            }
+        }
+    }
+
+    fn blend_ellipse(
+        &mut self,
+        x: f32,
+        y: f32,
+        radius_x: f32,
+        radius_y: f32,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        if self.width_px == 0 || radius_x <= 0.0 || radius_y <= 0.0 {
+            return;
+        }
+        let height_px = self.frame.len() / self.width_px / 4;
+        let x_start = (x - radius_x).floor().max(0.0) as usize;
+        let y_start = (y - radius_y).floor().max(0.0) as usize;
+        let x_end = (x + radius_x).ceil().min(self.width_px as f32) as usize;
+        let y_end = (y + radius_y).ceil().min(height_px as f32) as usize;
+
+        for py in y_start..y_end {
+            let dy = (py as f32 + 0.5 - y) / radius_y;
+            for px in x_start..x_end {
+                let dx = (px as f32 + 0.5 - x) / radius_x;
+                let distance = dx * dx + dy * dy;
+                if distance > 1.0 {
+                    continue;
+                }
+                let local_alpha = (alpha as f32 * (1.0 - distance).powf(1.7)) as u8;
+                if local_alpha == 0 {
+                    continue;
+                }
+                blend_pixel(self.frame, self.width_px, px, py, color, local_alpha);
             }
         }
     }
@@ -203,20 +236,22 @@ impl CursorTrail {
 
         for trail in &self.trails {
             let age = frame.now.duration_since(trail.started);
-            let progress =
-                ease_out_cubic((age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0));
-            let fade = 1.0 - (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
-            let start = (progress - self.config.length).max(0.0);
-            for sample in 0..18 {
-                let sample_progress = sample as f32 / 17.0;
+            let raw = (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
+            let progress = ease_out_quart(raw);
+            let fade = (1.0 - raw).powf(0.85);
+            let start = (progress - self.config.length * (0.65 + 0.35 * fade)).max(0.0);
+            for sample in 0..36 {
+                let sample_progress = sample as f32 / 35.0;
                 let t = start + (progress - start) * sample_progress;
                 let (x, y) = cursor_point(trail.from, trail.to, t);
-                let tail = sample_progress.powf(1.8);
-                let alpha = (180.0 * fade * tail).clamp(0.0, 180.0) as u8;
-                let scale = 0.65 + tail * 0.35;
-                frame.blend_cursor_glow(x, y, scale * 1.25, self.config.color, alpha / 4);
+                let tail = sample_progress.powf(1.35);
+                let alpha = (150.0 * fade * tail).clamp(0.0, 150.0) as u8;
+                let scale = 0.55 + tail * 0.55;
+                frame.blend_cursor_glow(x, y, scale * 1.35, self.config.color, alpha / 5);
                 frame.blend_cursor_at(x, y, scale, self.config.color, alpha);
             }
+            let (x, y) = cursor_point(trail.from, trail.to, progress);
+            frame.blend_cursor_at(x, y, 1.08, self.config.color, (210.0 * fade) as u8);
         }
     }
 }
@@ -241,12 +276,21 @@ fn cursor_point(from: Cursor, to: Cursor, t: f32) -> (f32, f32) {
     (from_x + (to_x - from_x) * t, from_y + (to_y - from_y) * t)
 }
 
-fn ease_out_cubic(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
+fn ease_out_quart(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(4)
 }
 
 fn cell_width() -> usize {
     CELL_WIDTH as usize
+}
+
+fn blend_pixel(frame: &mut [u8], width_px: usize, x: usize, y: usize, color: [u8; 3], alpha: u8) {
+    let index = (y * width_px + x) * 4;
+    let alpha = u16::from(alpha);
+    for (channel, target) in color.iter().zip(&mut frame[index..index + 3]) {
+        *target =
+            (((u16::from(*target) * (255 - alpha)) + (u16::from(*channel) * alpha)) / 255) as u8;
+    }
 }
 
 fn cell_height() -> usize {

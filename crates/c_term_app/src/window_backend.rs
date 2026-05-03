@@ -28,6 +28,7 @@ use crate::{
 
 pub(crate) const CELL_WIDTH: u32 = 8;
 pub(crate) const CELL_HEIGHT: u32 = 16;
+const ANIMATION_FRAME_MS: u64 = 8;
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 540;
 
@@ -125,7 +126,7 @@ impl WindowBackend {
         self.animation_queued = true;
         let proxy = self.proxy.clone();
         thread::spawn(move || {
-            thread::sleep(Duration::from_millis(16));
+            thread::sleep(Duration::from_millis(ANIMATION_FRAME_MS));
             let _ = proxy.send_event(UserEvent::AnimationFrame);
         });
     }
