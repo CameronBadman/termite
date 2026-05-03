@@ -261,16 +261,28 @@ impl Grid {
     }
 
     pub fn resize(&mut self, width: u16, height: u16) -> bool {
+        let width = width.max(1);
+        let height = height.max(1);
         if width == self.width && height == self.height {
             return false;
         }
 
-        self.width = width.max(1);
-        self.height = height.max(1);
-        self.cells.resize(
-            usize::from(self.width) * usize::from(self.height),
-            Cell::default(),
-        );
+        let old_width = self.width;
+        let old_height = self.height;
+        let mut cells = vec![Cell::default(); usize::from(width) * usize::from(height)];
+        let copy_width = old_width.min(width);
+        let copy_height = old_height.min(height);
+        for y in 0..copy_height {
+            let old_start = usize::from(y) * usize::from(old_width);
+            let new_start = usize::from(y) * usize::from(width);
+            let len = usize::from(copy_width);
+            cells[new_start..new_start + len]
+                .copy_from_slice(&self.cells[old_start..old_start + len]);
+        }
+
+        self.width = width;
+        self.height = height;
+        self.cells = cells;
         self.cursor.x = self.cursor.x.min(self.width - 1);
         self.cursor.y = self.cursor.y.min(self.height - 1);
         self.reset_scroll_region();

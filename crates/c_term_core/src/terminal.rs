@@ -291,6 +291,32 @@ mod tests {
     }
 
     #[test]
+    fn resize_preserves_cell_coordinates() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let _ = terminal.process_pty_input(b"ab\x1b[2;1Hcd");
+
+        let _ = terminal.resize(6, 3);
+
+        assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'b');
+        assert_eq!(terminal.grid().cell(0, 1).unwrap().ch, 'c');
+        assert_eq!(terminal.grid().cell(1, 1).unwrap().ch, 'd');
+    }
+
+    #[test]
+    fn resize_truncates_rows_by_coordinates() {
+        let mut terminal = TerminalCore::new(5, 2);
+        let _ = terminal.process_pty_input(b"abcd\x1b[2;1Hefgh");
+
+        let _ = terminal.resize(2, 2);
+
+        assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'b');
+        assert_eq!(terminal.grid().cell(0, 1).unwrap().ch, 'e');
+        assert_eq!(terminal.grid().cell(1, 1).unwrap().ch, 'f');
+    }
+
+    #[test]
     fn csi_cursor_position_writes_at_requested_cell() {
         let mut terminal = TerminalCore::new(4, 3);
         let _ = terminal.process_pty_input(b"\x1b[2;3Hx");
