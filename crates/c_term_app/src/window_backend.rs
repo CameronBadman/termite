@@ -354,11 +354,19 @@ fn ctrl_byte(ch: char) -> Option<u8> {
         match lower {
             ' ' | '@' | '2' => Some(0x00),
             '[' => Some(0x1b),
+            '3' => Some(0x1b),
             '\\' => Some(0x1c),
+            '4' => Some(0x1c),
             ']' => Some(0x1d),
+            '5' => Some(0x1d),
             '^' => Some(0x1e),
-            '_' => Some(0x1f),
+            '6' => Some(0x1e),
+            '_' | '/' | '-' | '7' => Some(0x1f),
             '?' => Some(0x7f),
+            '8' => Some(0x7f),
+            '`' => Some(0x00),
+            '~' => Some(0x1e),
+            '=' => Some(0x1f),
             _ => None,
         }
     }
