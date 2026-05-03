@@ -1,8 +1,0 @@
-[package]
-name = "c_term_plugins_api"
-edition.workspace = true
-license.workspace = true
-version.workspace = true
-
-[dependencies]
-

@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::{DamageRegion, DamageTracker, EraseMode, Generation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,14 +215,7 @@ impl Grid {
                 0..end
             }
         };
-        let mut changed = false;
-        for cell in &mut self.cells[range] {
-            if *cell != Cell::default() {
-                *cell = Cell::default();
-                changed = true;
-            }
-        }
-        if changed {
+        if self.clear_cells(range) {
             self.generation += 1;
             self.damage.mark(DamageRegion::Viewport);
         }
@@ -242,21 +237,8 @@ impl Grid {
             EraseMode::ToCursor => (row_start, cursor + 1, 0, self.cursor.x.saturating_add(1)),
             EraseMode::All => (row_start, row_end, 0, self.width),
         };
-        let mut changed = false;
-        for cell in &mut self.cells[start..end] {
-            if *cell != Cell::default() {
-                *cell = Cell::default();
-                changed = true;
-            }
-        }
-        if changed {
-            self.generation += 1;
-            self.damage.mark(DamageRegion::Cells {
-                x,
-                y: self.cursor.y,
-                width,
-                height: 1,
-            });
+        if self.clear_cells(start..end) {
+            self.mark_line_damage(self.cursor.y, x, width);
         }
     }
 
@@ -266,115 +248,27 @@ impl Grid {
     }
 
     pub fn delete_chars(&mut self, count: u16) {
-        if self.cursor.x >= self.width {
-            return;
-        }
-        let count = count.min(self.width - self.cursor.x);
-        let y = self.cursor.y;
-        let row_start = usize::from(y) * usize::from(self.width);
-        let x = usize::from(self.cursor.x);
-        let width = usize::from(self.width);
-        let count = usize::from(count);
-        let changed = self.cells[row_start + x..row_start + width]
-            .iter()
-            .any(|cell| *cell != Cell::default());
-
-        for index in x..width - count {
-            self.cells[row_start + index] = self.cells[row_start + index + count];
-        }
-        self.cells[row_start + width - count..row_start + width].fill(Cell::default());
-        if changed {
-            self.mark_line_damage(y, self.cursor.x, self.width - self.cursor.x);
-        }
+        self.shift_chars(count, false);
     }
 
     pub fn insert_blank_chars(&mut self, count: u16) {
-        if self.cursor.x >= self.width {
-            return;
-        }
-        let count = count.min(self.width - self.cursor.x);
-        let y = self.cursor.y;
-        let row_start = usize::from(y) * usize::from(self.width);
-        let x = usize::from(self.cursor.x);
-        let width = usize::from(self.width);
-        let count = usize::from(count);
-        let changed = self.cells[row_start + x..row_start + width]
-            .iter()
-            .any(|cell| *cell != Cell::default());
-
-        for index in (x + count..width).rev() {
-            self.cells[row_start + index] = self.cells[row_start + index - count];
-        }
-        self.cells[row_start + x..row_start + x + count].fill(Cell::default());
-        if changed {
-            self.mark_line_damage(y, self.cursor.x, self.width - self.cursor.x);
-        }
+        self.shift_chars(count, true);
     }
 
     pub fn delete_lines(&mut self, count: u16) {
-        if self.cursor.y < self.scroll_top || self.cursor.y > self.scroll_bottom {
-            return;
-        }
-        let count = count.min(self.scroll_bottom - self.cursor.y + 1);
-        let width = usize::from(self.width);
-        let start = usize::from(self.cursor.y) * width;
-        let bottom = usize::from(self.scroll_bottom) * width;
-        let count_cells = usize::from(count) * width;
-        if start + count_cells <= bottom {
-            self.cells
-                .copy_within(start + count_cells..bottom + width, start);
-        }
-        self.cells[bottom + width - count_cells..bottom + width].fill(Cell::default());
-        self.generation += 1;
-        self.damage.mark(DamageRegion::Viewport);
+        self.shift_lines(self.cursor.y, self.scroll_bottom, count, false);
     }
 
     pub fn insert_blank_lines(&mut self, count: u16) {
-        if self.cursor.y < self.scroll_top || self.cursor.y > self.scroll_bottom {
-            return;
-        }
-        let count = count.min(self.scroll_bottom - self.cursor.y + 1);
-        let width = usize::from(self.width);
-        let start = usize::from(self.cursor.y) * width;
-        let bottom = usize::from(self.scroll_bottom) * width;
-        let count_cells = usize::from(count) * width;
-        if start + count_cells <= bottom {
-            self.cells
-                .copy_within(start..bottom + width - count_cells, start + count_cells);
-        }
-        self.cells[start..start + count_cells].fill(Cell::default());
-        self.generation += 1;
-        self.damage.mark(DamageRegion::Viewport);
+        self.shift_lines(self.cursor.y, self.scroll_bottom, count, true);
     }
 
     pub fn scroll_up(&mut self, count: u16) {
-        let count = count.min(self.scroll_bottom - self.scroll_top + 1);
-        let width = usize::from(self.width);
-        let top = usize::from(self.scroll_top) * width;
-        let bottom = usize::from(self.scroll_bottom) * width;
-        let count_cells = usize::from(count) * width;
-        if top + count_cells <= bottom {
-            self.cells
-                .copy_within(top + count_cells..bottom + width, top);
-        }
-        self.cells[bottom + width - count_cells..bottom + width].fill(Cell::default());
-        self.generation += 1;
-        self.damage.mark(DamageRegion::Viewport);
+        self.shift_lines(self.scroll_top, self.scroll_bottom, count, false);
     }
 
     pub fn scroll_down(&mut self, count: u16) {
-        let count = count.min(self.scroll_bottom - self.scroll_top + 1);
-        let width = usize::from(self.width);
-        let top = usize::from(self.scroll_top) * width;
-        let bottom = usize::from(self.scroll_bottom) * width;
-        let count_cells = usize::from(count) * width;
-        if top + count_cells <= bottom {
-            self.cells
-                .copy_within(top..bottom + width - count_cells, top + count_cells);
-        }
-        self.cells[top..top + count_cells].fill(Cell::default());
-        self.generation += 1;
-        self.damage.mark(DamageRegion::Viewport);
+        self.shift_lines(self.scroll_top, self.scroll_bottom, count, true);
     }
 
     pub fn resize(&mut self, width: u16, height: u16) -> bool {
@@ -412,6 +306,11 @@ impl Grid {
         self.damage.drain(self.generation)
     }
 
+    pub fn invalidate(&mut self) {
+        self.generation += 1;
+        self.damage.mark(DamageRegion::Viewport);
+    }
+
     fn index(&self, x: u16, y: u16) -> Option<usize> {
         if x < self.width && y < self.height {
             Some(usize::from(y) * usize::from(self.width) + usize::from(x))
@@ -427,13 +326,70 @@ impl Grid {
         let row_start = usize::from(y) * usize::from(self.width);
         let start = row_start + usize::from(x_start);
         let end = row_start + usize::from(x_end.min(self.width));
-        let changed = self.cells[start..end]
-            .iter()
-            .any(|cell| *cell != Cell::default());
-        self.cells[start..end].fill(Cell::default());
-        if changed {
+        if self.clear_cells(start..end) {
             self.mark_line_damage(y, x_start, x_end.saturating_sub(x_start));
         }
+    }
+
+    fn clear_cells(&mut self, range: Range<usize>) -> bool {
+        let changed = self.cells[range.clone()]
+            .iter()
+            .any(|cell| *cell != Cell::default());
+        self.cells[range].fill(Cell::default());
+        changed
+    }
+
+    fn shift_chars(&mut self, count: u16, right: bool) {
+        if self.cursor.x >= self.width {
+            return;
+        }
+
+        let row_start = usize::from(self.cursor.y) * usize::from(self.width);
+        let x = usize::from(self.cursor.x);
+        let width = usize::from(self.width);
+        let count = usize::from(count.min(self.width - self.cursor.x));
+        let row_end = row_start + width;
+        let changed = self.cells[row_start + x..row_end]
+            .iter()
+            .any(|cell| *cell != Cell::default());
+
+        if right {
+            self.cells
+                .copy_within(row_start + x..row_end - count, row_start + x + count);
+            self.cells[row_start + x..row_start + x + count].fill(Cell::default());
+        } else {
+            self.cells
+                .copy_within(row_start + x + count..row_end, row_start + x);
+            self.cells[row_end - count..row_end].fill(Cell::default());
+        }
+
+        if changed {
+            self.mark_line_damage(self.cursor.y, self.cursor.x, self.width - self.cursor.x);
+        }
+    }
+
+    fn shift_lines(&mut self, top: u16, bottom: u16, count: u16, down: bool) {
+        if top < self.scroll_top || bottom > self.scroll_bottom || top > bottom {
+            return;
+        }
+
+        let width = usize::from(self.width);
+        let count = usize::from(count.min(bottom - top + 1));
+        let start = usize::from(top) * width;
+        let end = (usize::from(bottom) + 1) * width;
+        let count_cells = count * width;
+
+        if down {
+            self.cells
+                .copy_within(start..end - count_cells, start + count_cells);
+            self.cells[start..start + count_cells].fill(Cell::default());
+        } else {
+            self.cells.copy_within(start + count_cells..end, start);
+            self.cells[end - count_cells..end].fill(Cell::default());
+        }
+
+        self.generation += 1;
+        self.damage.mark(DamageRegion::Viewport);
     }
 
     fn mark_line_damage(&mut self, y: u16, x: u16, width: u16) {

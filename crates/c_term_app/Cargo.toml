@@ -6,10 +6,6 @@ version.workspace = true
 
 [dependencies]
 c_term_core = { path = "../c_term_core" }
-c_term_plugins_api = { path = "../c_term_plugins_api" }
-c_term_plugins_host = { path = "../c_term_plugins_host" }
-c_term_renderer = { path = "../c_term_renderer" }
-crossterm = "0.29.0"
 font8x8 = "0.3.1"
 nix = { version = "0.31.2", features = ["fs", "process", "term"] }
 pixels = "0.17.1"

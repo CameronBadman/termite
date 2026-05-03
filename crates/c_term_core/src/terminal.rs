@@ -1,17 +1,16 @@
 use crate::{
-    CoreEvent, Cursor, CursorPosition, DamageBatch, Grid, KeyPress, ParserAction, ParserAdapter,
-    SimpleParser, Style, StyleUpdate, TerminalMode,
+    Cursor, DamageBatch, Grid, ParserAction, ParserAdapter, SimpleParser, Style, StyleUpdate,
+    TerminalMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreTick {
     pub damage: DamageBatch,
-    pub events: Vec<CoreEvent>,
 }
 
 impl CoreTick {
     pub fn is_idle(&self) -> bool {
-        self.damage.is_empty() && self.events.is_empty()
+        self.damage.is_empty()
     }
 }
 
@@ -49,135 +48,62 @@ where
     }
 
     pub fn resize(&mut self, width: u16, height: u16) -> CoreTick {
-        let mut events = Vec::new();
-        if self.grid.resize(width, height) {
-            events.push(CoreEvent::ViewportChanged);
-        }
+        let _ = self.grid.resize(width, height);
         if let Some(grid) = &mut self.alternate_grid {
             let _ = grid.resize(width, height);
         }
-        self.tick(events)
-    }
-
-    pub fn handle_keypress(&mut self, keypress: KeyPress) -> CoreTick {
-        self.tick(vec![CoreEvent::KeyPress(keypress)])
+        self.tick()
     }
 
     pub fn process_pty_input(&mut self, input: &[u8]) -> CoreTick {
         if input.is_empty() {
-            return self.tick(Vec::new());
+            return self.tick();
         }
 
         let mut actions = Vec::new();
         self.parser.parse(input, &mut actions);
 
-        let mut events = Vec::new();
         for action in actions {
-            self.apply_action(action, &mut events);
+            self.apply_action(action);
         }
-        self.tick(events)
+        self.tick()
     }
 
-    fn apply_action(&mut self, action: ParserAction, events: &mut Vec<CoreEvent>) {
+    fn apply_action(&mut self, action: ParserAction) {
         match action {
             ParserAction::Print(ch) => {
-                let old_cursor = self.grid.cursor();
-                if let Some((x, y, cell)) = self.grid.put_char(ch, self.style) {
-                    events.push(CoreEvent::CellChanged { x, y, cell });
-                }
-                let new_cursor = self.grid.cursor();
-                if old_cursor != new_cursor {
-                    events.push(CoreEvent::CursorMoved {
-                        old: CursorPosition::from(old_cursor),
-                        new: CursorPosition::from(new_cursor),
-                    });
-                }
+                let _ = self.grid.put_char(ch, self.style);
             }
-            ParserAction::Tab => {
-                let old_cursor = self.grid.cursor();
-                self.grid.put_tab(self.style);
-                let new_cursor = self.grid.cursor();
-                if old_cursor != new_cursor {
-                    events.push(CoreEvent::CursorMoved {
-                        old: CursorPosition::from(old_cursor),
-                        new: CursorPosition::from(new_cursor),
-                    });
-                }
-            }
+            ParserAction::Tab => self.grid.put_tab(self.style),
             ParserAction::LineFeed => {
-                let old_cursor = self.grid.cursor();
-                self.grid.put_char('\n', self.style);
-                let new_cursor = self.grid.cursor();
-                if old_cursor != new_cursor {
-                    events.push(CoreEvent::CursorMoved {
-                        old: CursorPosition::from(old_cursor),
-                        new: CursorPosition::from(new_cursor),
-                    });
-                }
+                let _ = self.grid.put_char('\n', self.style);
             }
             ParserAction::CarriageReturn => {
-                if let Some((old, new)) = self.grid.move_cursor(0, self.grid.cursor().y) {
-                    events.push(CoreEvent::CursorMoved {
-                        old: CursorPosition::from(old),
-                        new: CursorPosition::from(new),
-                    });
-                }
+                let _ = self.grid.move_cursor(0, self.grid.cursor().y);
             }
             ParserAction::Backspace => {
                 let cursor = self.grid.cursor();
                 if cursor.x > 0 {
-                    if let Some((old, new)) = self.grid.move_cursor(cursor.x - 1, cursor.y) {
-                        events.push(CoreEvent::CursorMoved {
-                            old: CursorPosition::from(old),
-                            new: CursorPosition::from(new),
-                        });
-                    }
+                    let _ = self.grid.move_cursor(cursor.x - 1, cursor.y);
                 }
             }
-            ParserAction::Bell => events.push(CoreEvent::Bell),
-            ParserAction::SetTitle(title) => events.push(CoreEvent::TitleChanged(title)),
             ParserAction::SaveCursor => self.saved_cursor = Some(self.grid.cursor()),
             ParserAction::RestoreCursor => {
                 if let Some(cursor) = self.saved_cursor {
-                    if let Some((old, new)) = self.grid.move_cursor(cursor.x, cursor.y) {
-                        events.push(CoreEvent::CursorMoved {
-                            old: CursorPosition::from(old),
-                            new: CursorPosition::from(new),
-                        });
-                    }
+                    let _ = self.grid.move_cursor(cursor.x, cursor.y);
                 }
             }
-            ParserAction::ReverseIndex => {
-                let old_cursor = self.grid.cursor();
-                self.grid.reverse_index();
-                let new_cursor = self.grid.cursor();
-                if old_cursor != new_cursor {
-                    events.push(CoreEvent::CursorMoved {
-                        old: CursorPosition::from(old_cursor),
-                        new: CursorPosition::from(new_cursor),
-                    });
-                }
-            }
+            ParserAction::ReverseIndex => self.grid.reverse_index(),
             ParserAction::SetScrollRegion { top, bottom } => {
                 self.grid.set_scroll_region(top, bottom);
             }
             ParserAction::MoveCursor { x, y } => {
                 let cursor = self.grid.cursor();
                 let y = if y == u16::MAX { cursor.y } else { y };
-                if let Some((old, new)) = self.grid.move_cursor(x, y) {
-                    events.push(CoreEvent::CursorMoved {
-                        old: CursorPosition::from(old),
-                        new: CursorPosition::from(new),
-                    });
-                }
+                let _ = self.grid.move_cursor(x, y);
             }
             ParserAction::MoveCursorRelative { dx, dy } => {
-                if let Some((old, new)) = self.grid.move_cursor_relative(dx, dy) {
-                    events.push(CoreEvent::CursorMoved {
-                        old: CursorPosition::from(old),
-                        new: CursorPosition::from(new),
-                    });
-                }
+                let _ = self.grid.move_cursor_relative(dx, dy);
             }
             ParserAction::ClearScreen(mode) => self.grid.clear_screen(mode),
             ParserAction::ClearLine(mode) => self.grid.clear_line(mode),
@@ -188,7 +114,7 @@ where
             ParserAction::InsertBlankLines(count) => self.grid.insert_blank_lines(count),
             ParserAction::ScrollUp(count) => self.grid.scroll_up(count),
             ParserAction::ScrollDown(count) => self.grid.scroll_down(count),
-            ParserAction::SetMode { mode, enabled } => self.set_mode(mode, enabled, events),
+            ParserAction::SetMode { mode, enabled } => self.set_mode(mode, enabled),
             ParserAction::SetStyle(update) => self.apply_style(update),
             ParserAction::ResetStyle => self.style = Style::default(),
         }
@@ -204,14 +130,13 @@ where
         }
     }
 
-    fn set_mode(&mut self, mode: TerminalMode, enabled: bool, events: &mut Vec<CoreEvent>) {
+    fn set_mode(&mut self, mode: TerminalMode, enabled: bool) {
         match mode {
             TerminalMode::AlternateScreen => {
                 if enabled && self.alternate_grid.is_none() {
                     self.saved_cursor = Some(self.grid.cursor());
                     let replacement = Grid::new(self.grid.width(), self.grid.height());
                     self.alternate_grid = Some(std::mem::replace(&mut self.grid, replacement));
-                    events.push(CoreEvent::ViewportChanged);
                 } else if !enabled && self.alternate_grid.is_some() {
                     if let Some(primary) = self.alternate_grid.take() {
                         self.grid = primary;
@@ -219,32 +144,17 @@ where
                     if let Some(cursor) = self.saved_cursor {
                         let _ = self.grid.move_cursor(cursor.x, cursor.y);
                     }
-                    events.push(CoreEvent::ViewportChanged);
+                    self.grid.invalidate();
                 }
             }
             TerminalMode::CursorVisible => self.grid.set_cursor_visible(enabled),
             TerminalMode::Wrap => self.grid.set_wrap(enabled),
         }
-        events.push(CoreEvent::ModeChanged {
-            name: mode.name(),
-            enabled,
-        });
     }
 
-    fn tick(&mut self, events: Vec<CoreEvent>) -> CoreTick {
+    fn tick(&mut self) -> CoreTick {
         CoreTick {
             damage: self.grid.drain_damage(),
-            events,
-        }
-    }
-}
-
-impl TerminalMode {
-    fn name(self) -> &'static str {
-        match self {
-            Self::AlternateScreen => "alternate_screen",
-            Self::CursorVisible => "cursor_visible",
-            Self::Wrap => "wrap",
         }
     }
 }
@@ -268,16 +178,6 @@ mod tests {
 
         assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
         assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'b');
-        assert!(
-            tick.events
-                .iter()
-                .any(|event| matches!(event, CoreEvent::CellChanged { x: 0, y: 0, .. }))
-        );
-        assert!(
-            tick.events
-                .iter()
-                .any(|event| matches!(event, CoreEvent::CursorMoved { .. }))
-        );
         assert!(!tick.damage.is_empty());
     }
 
@@ -288,7 +188,6 @@ mod tests {
         let tick = terminal.resize(4, 4);
 
         assert_eq!(terminal.grid().width(), 4);
-        assert!(tick.events.contains(&CoreEvent::ViewportChanged));
         assert!(
             tick.damage
                 .regions
@@ -411,24 +310,19 @@ mod tests {
     }
 
     #[test]
-    fn osc_title_emits_title_event() {
-        let mut terminal = TerminalCore::new(2, 1);
-        let tick = terminal.process_pty_input(b"\x1b]2;c-term\x07");
-
-        assert!(
-            tick.events
-                .contains(&CoreEvent::TitleChanged("c-term".into()))
-        );
-    }
-
-    #[test]
     fn alternate_screen_restores_primary_grid() {
         let mut terminal = TerminalCore::new(4, 1);
-        let _ = terminal.process_pty_input(b"abc\x1b[?1049hxyz\x1b[?1049l");
+        let tick = terminal.process_pty_input(b"abc\x1b[?1049hxyz\x1b[?1049l");
 
         assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
         assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'b');
         assert_eq!(terminal.grid().cell(2, 0).unwrap().ch, 'c');
+        assert!(
+            tick.damage
+                .regions
+                .iter()
+                .any(|region| matches!(region, crate::DamageRegion::Viewport))
+        );
     }
 
     #[test]

@@ -5,8 +5,6 @@ pub enum ParserAction {
     LineFeed,
     CarriageReturn,
     Backspace,
-    Bell,
-    SetTitle(String),
     MoveCursor { x: u16, y: u16 },
     MoveCursorRelative { dx: i16, dy: i16 },
     SaveCursor,
@@ -96,28 +94,8 @@ impl vte::Perform for ActionPerformer<'_> {
             b'\r' => self.actions.push(ParserAction::CarriageReturn),
             b'\t' => self.actions.push(ParserAction::Tab),
             0x08 => self.actions.push(ParserAction::Backspace),
-            0x07 => self.actions.push(ParserAction::Bell),
             _ => {}
         }
-    }
-
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        let Some(command) = params
-            .first()
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        else {
-            return;
-        };
-        if !matches!(command, "0" | "2") {
-            return;
-        }
-        let Some(title) = params
-            .get(1)
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        else {
-            return;
-        };
-        self.actions.push(ParserAction::SetTitle(title.to_owned()));
     }
 
     fn csi_dispatch(

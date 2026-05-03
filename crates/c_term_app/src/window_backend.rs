@@ -7,8 +7,7 @@ use std::{
     thread,
 };
 
-use c_term_app::{AppAction, TerminalApp};
-use c_term_core::{Color, Grid, KeyModifiers, KeyPress, Style};
+use c_term_core::{Color, Grid, Style, TerminalCore};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use winit::{
@@ -20,7 +19,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::{PtyChild, child_has_exited, set_pty_winsize, spawn_shell};
+use crate::{PtyChild, set_pty_winsize, spawn_shell};
 
 const CELL_WIDTH: u32 = 8;
 const CELL_HEIGHT: u32 = 16;
@@ -33,7 +32,7 @@ enum UserEvent {
     ChildExited,
 }
 
-pub(crate) fn run_window_backend() -> Result<(), Box<dyn Error>> {
+pub(crate) fn run() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -48,12 +47,11 @@ struct WindowBackend {
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     pixels: Option<Pixels<'static>>,
-    terminal: Option<TerminalApp>,
+    terminal: Option<TerminalCore>,
     child: Option<PtyChild>,
     modifiers: ModifiersState,
     cols: u16,
     rows: u16,
-    dirty: bool,
 }
 
 impl WindowBackend {
@@ -68,7 +66,6 @@ impl WindowBackend {
             modifiers: ModifiersState::empty(),
             cols: 1,
             rows: 1,
-            dirty: false,
         }
     }
 
@@ -96,12 +93,7 @@ impl WindowBackend {
 
         self.cols = cols;
         self.rows = rows;
-        self.terminal = Some(TerminalApp::new(
-            cols,
-            rows,
-            buffer_width(cols),
-            buffer_height(rows),
-        ));
+        self.terminal = Some(TerminalCore::new(cols, rows));
         self.pixels = Some(pixels);
         self.child = Some(child);
         self.window = Some(window);
@@ -110,7 +102,6 @@ impl WindowBackend {
     }
 
     fn mark_dirty(&mut self) {
-        self.dirty = true;
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -120,7 +111,7 @@ impl WindowBackend {
         let Some(terminal) = &mut self.terminal else {
             return;
         };
-        if terminal.handle_action(AppAction::PtyBytes(bytes)).is_ok() {
+        if !terminal.process_pty_input(&bytes).is_idle() {
             self.mark_dirty();
         }
     }
@@ -143,21 +134,14 @@ impl WindowBackend {
             return;
         }
 
-        if let Some(child) = &mut self.child {
-            if let Err(error) = set_pty_winsize(child.master.as_raw_fd(), cols, rows) {
-                eprintln!("c-term: failed to resize PTY: {error}");
-            }
+        if let Some(child) = &mut self.child
+            && let Err(error) = set_pty_winsize(child.master.as_raw_fd(), cols, rows)
+        {
+            eprintln!("c-term: failed to resize PTY: {error}");
         }
 
         if let Some(terminal) = &mut self.terminal {
-            let _ = terminal.handle_action(AppAction::ResizeCells {
-                width: cols,
-                height: rows,
-            });
-            let _ = terminal.handle_action(AppAction::ResizePixels {
-                width: buffer_width(cols),
-                height: buffer_height(rows),
-            });
+            let _ = terminal.resize(cols, rows);
         }
 
         if let Err(error) = pixels.resize_buffer(buffer_width(cols), buffer_height(rows)) {
@@ -184,23 +168,10 @@ impl WindowBackend {
             return;
         };
 
-        if let Some(terminal) = &mut self.terminal {
-            let _ = terminal.handle_action(AppAction::KeyPress(KeyPress {
-                logical_key: format!("{:?}", event.logical_key),
-                text: event.text.as_ref().map(ToString::to_string),
-                modifiers: KeyModifiers {
-                    ctrl: self.modifiers.control_key(),
-                    alt: self.modifiers.alt_key(),
-                    shift: self.modifiers.shift_key(),
-                    super_key: self.modifiers.super_key(),
-                },
-            }));
-        }
-
-        if let Some(child) = &mut self.child {
-            if let Err(error) = child.master.write_all(&bytes) {
-                eprintln!("c-term: failed to write key to PTY: {error}");
-            }
+        if let Some(child) = &mut self.child
+            && let Err(error) = child.master.write_all(&bytes)
+        {
+            eprintln!("c-term: failed to write key to PTY: {error}");
         }
     }
 
@@ -209,11 +180,10 @@ impl WindowBackend {
             return;
         };
 
-        draw_grid_to_frame(terminal.core().grid(), pixels.frame_mut());
+        draw_grid_to_frame(terminal.grid(), pixels.frame_mut());
         if let Err(error) = pixels.render() {
             eprintln!("c-term: GPU render failed: {error}");
         }
-        self.dirty = false;
     }
 }
 
@@ -246,23 +216,6 @@ impl ApplicationHandler<UserEvent> for WindowBackend {
             _ => {}
         }
     }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self
-            .child
-            .as_ref()
-            .is_some_and(|child| child_has_exited(child.pid))
-        {
-            event_loop.exit();
-            return;
-        }
-
-        if self.dirty {
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
-        }
-    }
 }
 
 fn spawn_pty_reader(child: &mut PtyChild, proxy: EventLoopProxy<UserEvent>) -> io::Result<()> {
@@ -270,24 +223,19 @@ fn spawn_pty_reader(child: &mut PtyChild, proxy: EventLoopProxy<UserEvent>) -> i
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => {
+            let n = match reader.read(&mut buffer) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(0) | Err(_) => {
                     let _ = proxy.send_event(UserEvent::ChildExited);
                     break;
                 }
-                Ok(n) => {
-                    if proxy
-                        .send_event(UserEvent::PtyBytes(buffer[..n].to_vec()))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => {
-                    let _ = proxy.send_event(UserEvent::ChildExited);
-                    break;
-                }
+                Ok(n) => n,
+            };
+            if proxy
+                .send_event(UserEvent::PtyBytes(buffer[..n].to_vec()))
+                .is_err()
+            {
+                break;
             }
         }
     });
@@ -420,20 +368,10 @@ fn draw_cell(
             if cursor {
                 color = [255 - color[0], 255 - color[1], 255 - color[2]];
             }
-            put_pixel(frame, width, origin_x + px, origin_y + py, color);
+            let index = ((origin_y + py) * width + origin_x + px) * 4;
+            frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
         }
     }
-}
-
-fn put_pixel(frame: &mut [u8], width: usize, x: usize, y: usize, rgb: [u8; 3]) {
-    let index = (y * width + x) * 4;
-    if index + 3 >= frame.len() {
-        return;
-    }
-    frame[index] = rgb[0];
-    frame[index + 1] = rgb[1];
-    frame[index + 2] = rgb[2];
-    frame[index + 3] = 0xff;
 }
 
 fn rgb(color: Color, fallback: [u8; 3]) -> [u8; 3] {
