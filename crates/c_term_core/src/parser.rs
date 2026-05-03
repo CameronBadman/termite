@@ -15,6 +15,13 @@ pub enum ParserAction {
     SetScrollRegion { top: u16, bottom: u16 },
     ClearScreen(EraseMode),
     ClearLine(EraseMode),
+    EraseChars(u16),
+    DeleteChars(u16),
+    InsertBlankChars(u16),
+    DeleteLines(u16),
+    InsertBlankLines(u16),
+    ScrollUp(u16),
+    ScrollDown(u16),
     SetMode { mode: TerminalMode, enabled: bool },
     SetStyle(StyleUpdate),
     ResetStyle,
@@ -134,6 +141,9 @@ impl vte::Perform for ActionPerformer<'_> {
         }
 
         match action {
+            '@' => self
+                .actions
+                .push(ParserAction::InsertBlankChars(param(params, 0, 1))),
             'A' => self.relative(0, -amount(params, 0, 1)),
             'B' => self.relative(0, amount(params, 0, 1)),
             'C' => self.relative(amount(params, 0, 1), 0),
@@ -152,6 +162,24 @@ impl vte::Perform for ActionPerformer<'_> {
             'K' => self
                 .actions
                 .push(ParserAction::ClearLine(erase_mode(params))),
+            'L' => self
+                .actions
+                .push(ParserAction::InsertBlankLines(param(params, 0, 1))),
+            'M' => self
+                .actions
+                .push(ParserAction::DeleteLines(param(params, 0, 1))),
+            'P' => self
+                .actions
+                .push(ParserAction::DeleteChars(param(params, 0, 1))),
+            'S' => self
+                .actions
+                .push(ParserAction::ScrollUp(param(params, 0, 1))),
+            'T' => self
+                .actions
+                .push(ParserAction::ScrollDown(param(params, 0, 1))),
+            'X' => self
+                .actions
+                .push(ParserAction::EraseChars(param(params, 0, 1))),
             'm' => self.sgr(params),
             'r' => self.actions.push(ParserAction::SetScrollRegion {
                 top: param(params, 0, 1).saturating_sub(1),

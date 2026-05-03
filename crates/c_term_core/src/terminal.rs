@@ -181,6 +181,13 @@ where
             }
             ParserAction::ClearScreen(mode) => self.grid.clear_screen(mode),
             ParserAction::ClearLine(mode) => self.grid.clear_line(mode),
+            ParserAction::EraseChars(count) => self.grid.erase_chars(count),
+            ParserAction::DeleteChars(count) => self.grid.delete_chars(count),
+            ParserAction::InsertBlankChars(count) => self.grid.insert_blank_chars(count),
+            ParserAction::DeleteLines(count) => self.grid.delete_lines(count),
+            ParserAction::InsertBlankLines(count) => self.grid.insert_blank_lines(count),
+            ParserAction::ScrollUp(count) => self.grid.scroll_up(count),
+            ParserAction::ScrollDown(count) => self.grid.scroll_down(count),
             ParserAction::SetMode { mode, enabled } => self.set_mode(mode, enabled, events),
             ParserAction::SetStyle(update) => self.apply_style(update),
             ParserAction::ResetStyle => self.style = Style::default(),
@@ -317,6 +324,64 @@ mod tests {
     }
 
     #[test]
+    fn erase_chars_removes_stale_cells() {
+        let mut terminal = TerminalCore::new(6, 1);
+        let _ = terminal.process_pty_input(b"abcde\x1b[1;2H\x1b[2X");
+
+        assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, ' ');
+        assert_eq!(terminal.grid().cell(2, 0).unwrap().ch, ' ');
+        assert_eq!(terminal.grid().cell(3, 0).unwrap().ch, 'd');
+    }
+
+    #[test]
+    fn delete_chars_shifts_line_left() {
+        let mut terminal = TerminalCore::new(7, 1);
+        let _ = terminal.process_pty_input(b"abcdef\x1b[1;3H\x1b[2P");
+
+        assert_eq!(row_text(terminal.grid(), 0), "abef   ");
+    }
+
+    #[test]
+    fn insert_blank_chars_shifts_line_right() {
+        let mut terminal = TerminalCore::new(7, 1);
+        let _ = terminal.process_pty_input(b"abcdef\x1b[1;3H\x1b[2@");
+
+        assert_eq!(row_text(terminal.grid(), 0), "ab  cde");
+    }
+
+    #[test]
+    fn delete_and_insert_lines_clear_scrolled_rows() {
+        let mut terminal = TerminalCore::new(4, 3);
+        let _ = terminal.process_pty_input(b"aaa\x1b[2;1Hbbb\x1b[3;1Hccc\x1b[2;1H\x1b[1M");
+
+        assert_eq!(row_text(terminal.grid(), 0), "aaa ");
+        assert_eq!(row_text(terminal.grid(), 1), "ccc ");
+        assert_eq!(row_text(terminal.grid(), 2), "    ");
+
+        let _ = terminal.process_pty_input(b"\x1b[2;1H\x1b[1L");
+        assert_eq!(row_text(terminal.grid(), 1), "    ");
+        assert_eq!(row_text(terminal.grid(), 2), "ccc ");
+    }
+
+    #[test]
+    fn scroll_up_and_down_apply_to_scroll_region() {
+        let mut terminal = TerminalCore::new(4, 4);
+        let _ = terminal
+            .process_pty_input(b"aaa\x1b[2;1Hbbb\x1b[3;1Hccc\x1b[4;1Hddd\x1b[2;4r\x1b[1;1H\x1b[1S");
+
+        assert_eq!(row_text(terminal.grid(), 0), "aaa ");
+        assert_eq!(row_text(terminal.grid(), 1), "ccc ");
+        assert_eq!(row_text(terminal.grid(), 2), "ddd ");
+        assert_eq!(row_text(terminal.grid(), 3), "    ");
+
+        let _ = terminal.process_pty_input(b"\x1b[1T");
+        assert_eq!(row_text(terminal.grid(), 1), "    ");
+        assert_eq!(row_text(terminal.grid(), 2), "ccc ");
+        assert_eq!(row_text(terminal.grid(), 3), "ddd ");
+    }
+
+    #[test]
     fn csi_cursor_position_writes_at_requested_cell() {
         let mut terminal = TerminalCore::new(4, 3);
         let _ = terminal.process_pty_input(b"\x1b[2;3Hx");
@@ -405,5 +470,11 @@ mod tests {
         let _ = terminal.process_pty_input(b"\x1b[3G\x1b[sA\x1b[1G\x1b[uB");
 
         assert_eq!(terminal.grid().cell(2, 0).unwrap().ch, 'B');
+    }
+
+    fn row_text(grid: &Grid, y: u16) -> String {
+        (0..grid.width())
+            .map(|x| grid.cell(x, y).unwrap().ch)
+            .collect()
     }
 }
