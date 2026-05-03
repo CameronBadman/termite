@@ -4,7 +4,10 @@ use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::plugins::{OverlayCommand, OverlayKind};
 
-use super::{CELL_HEIGHT, RowBand, ScrollDamage, TextureUpdate};
+use super::{
+    CELL_HEIGHT,
+    render_cache::{RowBand, ScrollDamage, TextureUpdate},
+};
 
 const MAX_OVERLAYS: usize = 16;
 const OVERLAY_BYTES: usize = 64;
