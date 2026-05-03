@@ -7,11 +7,7 @@ const USE_TTF_FONT: bool = false;
 const TTF_FONT_PATH: &str = "/usr/share/fonts/liberation-fonts/LiberationMono-Regular.ttf";
 
 pub(crate) fn runner() -> Runner {
-    Runner::new().with(basic_terminal())
-}
-
-fn basic_terminal() -> impl RunnerPart {
-    parts().with(terminal_font()).with(cursor_overlays())
+    Runner::new().with(terminal_font()).with(terminal_plugins())
 }
 
 fn terminal_font() -> impl RunnerPart {
@@ -22,11 +18,13 @@ fn terminal_font() -> impl RunnerPart {
     }
 }
 
-fn cursor_overlays() -> impl RunnerPart {
-    parts().with(cursor_line()).with(cursor_trail())
+fn terminal_plugins() -> impl RunnerPart {
+    parts()
+        .with(cursor_line_plugin())
+        .with(cursor_trail_plugin())
 }
 
-fn cursor_line() -> CursorLine {
+fn cursor_line_plugin() -> CursorLine {
     CursorLine::new(cursor_line_config())
 }
 
@@ -39,7 +37,7 @@ fn cursor_line_config() -> CursorLineConfig {
     }
 }
 
-fn cursor_trail() -> CursorTrail {
+fn cursor_trail_plugin() -> CursorTrail {
     CursorTrail::new(cursor_trail_config())
 }
 
@@ -60,15 +58,15 @@ mod tests {
 
     fn nested_plugins() -> impl RunnerPart {
         parts()
-            .with(parts().with(cursor_line()))
-            .with(parts().with(cursor_trail()))
+            .with(parts().with(cursor_line_plugin()))
+            .with(parts().with(cursor_trail_plugin()))
     }
 
     #[test]
     fn runner_config_can_compose_plugin_groups() {
         let runner = Runner::new()
-            .with(parts().with(cursor_line()))
-            .with(parts().with(cursor_trail()));
+            .with(parts().with(cursor_line_plugin()))
+            .with(parts().with(cursor_trail_plugin()));
 
         assert_eq!(runner.plugin_count(), 2);
     }
