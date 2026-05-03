@@ -22,8 +22,6 @@ pub(crate) struct OverlayCommand {
 }
 
 pub(crate) struct PluginFrame<'a> {
-    pub(crate) frame: &'a mut [u8],
-    pub(crate) width_px: usize,
     pub(crate) grid: &'a Grid,
     pub(crate) now: Instant,
     pub(crate) overlays: Vec<OverlayCommand>,
@@ -32,14 +30,6 @@ pub(crate) struct PluginFrame<'a> {
 impl PluginFrame<'_> {
     pub(crate) fn blend_cell(&mut self, x: u16, y: u16, color: [u8; 3], alpha: u8) {
         self.push_rect(
-            usize::from(x) * cell_width(),
-            usize::from(y) * cell_height(),
-            cell_width(),
-            cell_height(),
-            color,
-            alpha,
-        );
-        self.blend_rect(
             usize::from(x) * cell_width(),
             usize::from(y) * cell_height(),
             cell_width(),
@@ -56,9 +46,6 @@ impl PluginFrame<'_> {
             alpha,
             corners,
         });
-        self.blend_quad_with(corners, color, alpha, |edge_distance| {
-            smoothstep(0.0, 1.25, edge_distance)
-        });
     }
 
     pub(crate) fn blend_quad_ring(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
@@ -68,21 +55,10 @@ impl PluginFrame<'_> {
             alpha,
             corners,
         });
-        self.blend_quad_with(corners, color, alpha, |edge_distance| {
-            1.0 - smoothstep(1.0, 3.0, edge_distance)
-        });
     }
 
     pub(crate) fn blend_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
         self.push_rect(
-            0,
-            usize::from(y) * cell_height(),
-            usize::from(self.grid.width()) * cell_width(),
-            cell_height(),
-            color,
-            alpha,
-        );
-        self.blend_rect(
             0,
             usize::from(y) * cell_height(),
             usize::from(self.grid.width()) * cell_width(),
@@ -111,86 +87,6 @@ impl PluginFrame<'_> {
             alpha,
             corners: [(right, top), (right, bottom), (left, bottom), (left, top)],
         });
-    }
-
-    fn blend_rect(
-        &mut self,
-        x: usize,
-        y: usize,
-        width: usize,
-        height: usize,
-        color: [u8; 3],
-        alpha: u8,
-    ) {
-        if self.width_px == 0 {
-            return;
-        }
-        let height_px = self.frame.len() / self.width_px / 4;
-        let x_end = (x + width).min(self.width_px);
-        let y_end = (y + height).min(height_px);
-        let alpha = u16::from(alpha);
-        for py in y..y_end {
-            for px in x..x_end {
-                let index = (py * self.width_px + px) * 4;
-                for (channel, target) in color.iter().zip(&mut self.frame[index..index + 3]) {
-                    *target = (((u16::from(*target) * (255 - alpha))
-                        + (u16::from(*channel) * alpha))
-                        / 255) as u8;
-                }
-            }
-        }
-    }
-
-    fn blend_quad_with(
-        &mut self,
-        corners: [Point; 4],
-        color: [u8; 3],
-        alpha: u8,
-        opacity: impl Fn(f32) -> f32,
-    ) {
-        if self.width_px == 0 {
-            return;
-        }
-        let height_px = self.frame.len() / self.width_px / 4;
-        let min_x = corners
-            .iter()
-            .map(|corner| corner.0)
-            .fold(f32::INFINITY, f32::min)
-            .floor()
-            .max(0.0) as usize;
-        let max_x = corners
-            .iter()
-            .map(|corner| corner.0)
-            .fold(f32::NEG_INFINITY, f32::max)
-            .ceil()
-            .min(self.width_px as f32) as usize;
-        let min_y = corners
-            .iter()
-            .map(|corner| corner.1)
-            .fold(f32::INFINITY, f32::min)
-            .floor()
-            .max(0.0) as usize;
-        let max_y = corners
-            .iter()
-            .map(|corner| corner.1)
-            .fold(f32::NEG_INFINITY, f32::max)
-            .ceil()
-            .min(height_px as f32) as usize;
-
-        for py in min_y..max_y {
-            for px in min_x..max_x {
-                let point = (px as f32 + 0.5, py as f32 + 0.5);
-                if !point_in_quad(point, corners) {
-                    continue;
-                }
-                let edge_distance = distance_to_quad_edge(point, corners);
-                let local_alpha = (alpha as f32 * opacity(edge_distance).clamp(0.0, 1.0)) as u8;
-                if local_alpha == 0 {
-                    continue;
-                }
-                blend_pixel(self.frame, self.width_px, px, py, color, local_alpha);
-            }
-        }
     }
 }
 
@@ -284,7 +180,6 @@ pub(crate) struct CursorTrailConfig {
     pub(crate) decay_ms: u64,
     pub(crate) fast_decay_ratio: f32,
     pub(crate) threshold: u16,
-    pub(crate) length: f32,
     pub(crate) color: CursorTrailColor,
 }
 
@@ -295,7 +190,6 @@ impl Default for CursorTrailConfig {
             decay_ms: 280,
             fast_decay_ratio: 0.38,
             threshold: 2,
-            length: 1.0,
             color: CursorTrailColor::Auto,
         }
     }
@@ -620,15 +514,11 @@ fn exponential_step(dt: f32, decay: f32) -> f32 {
     1.0 - 2.0_f32.powf(-10.0 * dt / decay.max(0.001))
 }
 
-fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
-    let value = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    value * value * (3.0 - 2.0 * value)
-}
-
 fn point_length(point: Point) -> f32 {
     (point.0 * point.0 + point.1 * point.1).sqrt()
 }
 
+#[cfg(test)]
 fn point_in_quad(point: Point, corners: [Point; 4]) -> bool {
     let mut sign = 0.0_f32;
     for i in 0..4 {
@@ -647,12 +537,14 @@ fn point_in_quad(point: Point, corners: [Point; 4]) -> bool {
     true
 }
 
+#[cfg(test)]
 fn distance_to_quad_edge(point: Point, corners: [Point; 4]) -> f32 {
     (0..4)
         .map(|i| distance_to_segment(point.0, point.1, corners[i], corners[(i + 1) % 4]))
         .fold(f32::INFINITY, f32::min)
 }
 
+#[cfg(test)]
 fn distance_to_segment(px: f32, py: f32, from: (f32, f32), to: (f32, f32)) -> f32 {
     let dx = to.0 - from.0;
     let dy = to.1 - from.1;
@@ -674,15 +566,6 @@ fn cell_width() -> usize {
     CELL_WIDTH as usize
 }
 
-fn blend_pixel(frame: &mut [u8], width_px: usize, x: usize, y: usize, color: [u8; 3], alpha: u8) {
-    let index = (y * width_px + x) * 4;
-    let alpha = u16::from(alpha);
-    for (channel, target) in color.iter().zip(&mut frame[index..index + 3]) {
-        *target =
-            (((u16::from(*target) * (255 - alpha)) + (u16::from(*channel) * alpha)) / 255) as u8;
-    }
-}
-
 fn cell_height() -> usize {
     CELL_HEIGHT as usize
 }
@@ -692,14 +575,8 @@ mod tests {
     use super::*;
     use c_term_core::TerminalCore;
 
-    fn frame_for<'a>(
-        terminal: &'a TerminalCore,
-        bytes: &'a mut [u8],
-        now: Instant,
-    ) -> PluginFrame<'a> {
+    fn frame_for(terminal: &TerminalCore, now: Instant) -> PluginFrame<'_> {
         PluginFrame {
-            frame: bytes,
-            width_px: 4 * CELL_WIDTH as usize,
             grid: terminal.grid(),
             now,
             overlays: Vec::new(),
@@ -712,7 +589,6 @@ mod tests {
             decay_ms: 300,
             fast_decay_ratio: 0.38,
             threshold: 1,
-            length: 1.0,
             color: CursorTrailColor::Rgb([255, 0, 0]),
         }
     }
@@ -723,12 +599,11 @@ mod tests {
         let mut host = PluginHost::new();
         host.add(CursorLine::default());
         host.add(CursorTrail::new(CursorTrailConfig::default()));
-        let mut bytes = vec![10; 4 * CELL_WIDTH as usize * CELL_HEIGHT as usize * 4];
+        let mut frame = frame_for(&terminal, Instant::now());
 
-        host.draw(&mut frame_for(&terminal, &mut bytes, Instant::now()));
+        host.draw(&mut frame);
 
-        assert_ne!(bytes[0], 10);
-        assert_eq!(bytes[3], 10);
+        assert!(!frame.overlays.is_empty());
     }
 
     #[test]
@@ -740,15 +615,10 @@ mod tests {
         let mut terminal = TerminalCore::new(4, 1);
         let mut plugin = CursorTrail::new(config);
         let start = Instant::now();
-        let mut bytes = vec![10; 4 * CELL_WIDTH as usize * CELL_HEIGHT as usize * 4];
 
-        assert!(!plugin.draw(&mut frame_for(&terminal, &mut bytes, start)));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
         let _ = terminal.process_pty_input(b"\x1b[4G");
-        assert!(plugin.draw(&mut frame_for(
-            &terminal,
-            &mut bytes,
-            start + Duration::from_millis(1),
-        )));
+        assert!(plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(1),)));
     }
 
     #[test]
@@ -757,27 +627,14 @@ mod tests {
         let mut terminal = TerminalCore::new(20, 5);
         let mut plugin = CursorTrail::new(config);
         let start = Instant::now();
-        let mut bytes = vec![10; 20 * CELL_WIDTH as usize * 5 * CELL_HEIGHT as usize * 4];
 
-        assert!(!plugin.draw(&mut PluginFrame {
-            frame: &mut bytes,
-            width_px: 20 * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now: start,
-            overlays: Vec::new(),
-        }));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
 
         let _ = terminal.process_pty_input(
             b"aaaaaaaaaaaaaaaaaaa\x1b[2;1Hbbbbbbbbbbbbbbbbbbb\x1b[3;1Hccccccccccccccccccc\x1b[5;20H",
         );
 
-        assert!(!plugin.draw(&mut PluginFrame {
-            frame: &mut bytes,
-            width_px: 20 * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now: start + Duration::from_millis(1),
-            overlays: Vec::new(),
-        }));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(1),)));
     }
 
     #[test]
@@ -786,25 +643,12 @@ mod tests {
         let mut terminal = TerminalCore::new(20, 5);
         let mut plugin = CursorTrail::new(config);
         let start = Instant::now();
-        let mut bytes = vec![10; 20 * CELL_WIDTH as usize * 5 * CELL_HEIGHT as usize * 4];
 
         let _ = terminal.process_pty_input(b"\x1b[1;10H");
-        assert!(!plugin.draw(&mut PluginFrame {
-            frame: &mut bytes,
-            width_px: 20 * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now: start,
-            overlays: Vec::new(),
-        }));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
 
         let _ = terminal.process_pty_input(b"\x1b[?1049h");
-        assert!(!plugin.draw(&mut PluginFrame {
-            frame: &mut bytes,
-            width_px: 20 * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now: start + Duration::from_millis(1),
-            overlays: Vec::new(),
-        }));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(1),)));
     }
 
     #[test]
@@ -862,25 +706,12 @@ mod tests {
         let mut terminal = TerminalCore::new(8, 1);
         let mut plugin = CursorTrail::new(config);
         let start = Instant::now();
-        let mut bytes = vec![10; 8 * CELL_WIDTH as usize * CELL_HEIGHT as usize * 4];
 
-        assert!(!plugin.draw(&mut PluginFrame {
-            frame: &mut bytes,
-            width_px: 8 * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now: start,
-            overlays: Vec::new(),
-        }));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
 
         let _ = terminal.process_pty_input(b"\x1b[?2026h\x1b[8G");
 
-        assert!(!plugin.draw(&mut PluginFrame {
-            frame: &mut bytes,
-            width_px: 8 * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now: start + Duration::from_millis(1),
-            overlays: Vec::new(),
-        }));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(1),)));
     }
 
     #[test]
@@ -889,26 +720,13 @@ mod tests {
         let mut terminal = TerminalCore::new(8, 2);
         let mut plugin = CursorTrail::new(config);
         let start = Instant::now();
-        let mut bytes = vec![10; 8 * CELL_WIDTH as usize * 2 * CELL_HEIGHT as usize * 4];
 
         let _ = terminal.process_pty_input(b"\x1b[1;8H");
-        assert!(!plugin.draw(&mut PluginFrame {
-            frame: &mut bytes,
-            width_px: 8 * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now: start,
-            overlays: Vec::new(),
-        }));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
 
         let _ = terminal.process_pty_input(b"\x1b[2;1H");
 
-        assert!(!plugin.draw(&mut PluginFrame {
-            frame: &mut bytes,
-            width_px: 8 * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now: start + Duration::from_millis(30),
-            overlays: Vec::new(),
-        }));
+        assert!(!plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(30),)));
     }
 
     #[test]

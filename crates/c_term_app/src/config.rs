@@ -49,7 +49,6 @@ fn cursor_trail_config() -> CursorTrailConfig {
         decay_ms: 320,
         fast_decay_ratio: 0.42,
         threshold: 2,
-        length: 1.0,
         color: CursorTrailColor::Auto,
     }
 }
