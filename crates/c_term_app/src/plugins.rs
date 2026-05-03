@@ -28,7 +28,7 @@ pub(crate) struct PluginFrame<'a> {
 }
 
 impl PluginFrame<'_> {
-    pub(crate) fn blend_cell(&mut self, x: u16, y: u16, color: [u8; 3], alpha: u8) {
+    pub(crate) fn overlay_cell(&mut self, x: u16, y: u16, color: [u8; 3], alpha: u8) {
         self.push_rect(
             usize::from(x) * cell_width(),
             usize::from(y) * cell_height(),
@@ -39,7 +39,7 @@ impl PluginFrame<'_> {
         );
     }
 
-    pub(crate) fn blend_quad(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
+    pub(crate) fn overlay_quad(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
         self.overlays.push(OverlayCommand {
             kind: OverlayKind::Quad,
             color,
@@ -48,7 +48,7 @@ impl PluginFrame<'_> {
         });
     }
 
-    pub(crate) fn blend_quad_ring(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
+    pub(crate) fn overlay_quad_ring(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
         self.overlays.push(OverlayCommand {
             kind: OverlayKind::QuadRing,
             color,
@@ -57,7 +57,7 @@ impl PluginFrame<'_> {
         });
     }
 
-    pub(crate) fn blend_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
+    pub(crate) fn overlay_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
         self.push_rect(
             0,
             usize::from(y) * cell_height(),
@@ -162,8 +162,8 @@ impl Plugin for CursorLine {
     fn draw(&mut self, frame: &mut PluginFrame<'_>) -> bool {
         let cursor = frame.grid.cursor();
         if cursor.visible {
-            frame.blend_row(cursor.y, self.config.row_color, self.config.row_alpha);
-            frame.blend_cell(
+            frame.overlay_row(cursor.y, self.config.row_color, self.config.row_alpha);
+            frame.overlay_cell(
                 cursor.x,
                 cursor.y,
                 self.config.cell_color,
@@ -462,10 +462,10 @@ impl CursorTrail {
 
         let edge = lift_color(self.color, 1.25, 28);
         let hot = lift_color(self.color, 1.8, 64);
-        frame.blend_quad(self.corners, [4, 8, 12], 82);
-        frame.blend_quad_ring(self.corners, edge, 235);
-        frame.blend_quad(self.corners, self.color, 205);
-        frame.blend_quad_ring(self.corners, hot, 132);
+        frame.overlay_quad(self.corners, [4, 8, 12], 82);
+        frame.overlay_quad_ring(self.corners, edge, 235);
+        frame.overlay_quad(self.corners, self.color, 205);
+        frame.overlay_quad_ring(self.corners, hot, 132);
     }
 }
 
@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_plugins_tint_frame() {
+    fn configured_plugins_emit_overlays() {
         let terminal = TerminalCore::new(4, 1);
         let mut host = PluginHost::new();
         host.add(CursorLine::default());
