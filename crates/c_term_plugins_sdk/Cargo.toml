@@ -1,0 +1,9 @@
+[package]
+name = "c_term_plugins_sdk"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+c_term_plugins_api = { path = "../c_term_plugins_api" }
+
