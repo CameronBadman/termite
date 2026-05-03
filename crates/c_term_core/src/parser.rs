@@ -3,9 +3,11 @@ pub enum ParserAction {
     Print(char),
     Tab,
     LineFeed,
+    NextLine,
     CarriageReturn,
     Backspace,
     Reset,
+    Repeat(u16),
     MoveCursor { x: u16, y: u16 },
     MoveCursorRelative { dx: i16, dy: i16 },
     SaveCursor,
@@ -22,7 +24,10 @@ pub enum ParserAction {
     ScrollUp(u16),
     ScrollDown(u16),
     SetMode { mode: TerminalMode, enabled: bool },
+    SetCursorShape(crate::CursorShape),
     SetStyle(StyleUpdate),
+    ReportMode(u16),
+    Respond(Vec<u8>),
     ResetStyle,
 }
 
@@ -50,17 +55,35 @@ pub enum EraseMode {
 pub enum TerminalMode {
     AlternateScreen,
     CursorVisible,
+    MouseTracking(MouseTracking),
+    SgrMouse,
+    SynchronizedUpdate,
     Wrap,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseTracking {
+    #[default]
+    None,
+    Click,
+    Drag,
+    Any,
 }
 
 pub struct SimpleParser {
     parser: vte::Parser,
+    g0_line_drawing: bool,
+    g1_line_drawing: bool,
+    use_g1: bool,
 }
 
 impl Default for SimpleParser {
     fn default() -> Self {
         Self {
             parser: vte::Parser::new(),
+            g0_line_drawing: false,
+            g1_line_drawing: false,
+            use_g1: false,
         }
     }
 }
@@ -75,18 +98,32 @@ impl std::fmt::Debug for SimpleParser {
 
 impl ParserAdapter for SimpleParser {
     fn parse(&mut self, input: &[u8], actions: &mut Vec<ParserAction>) {
-        let mut performer = ActionPerformer { actions };
+        let mut performer = ActionPerformer {
+            actions,
+            g0_line_drawing: &mut self.g0_line_drawing,
+            g1_line_drawing: &mut self.g1_line_drawing,
+            use_g1: &mut self.use_g1,
+        };
         self.parser.advance(&mut performer, input);
     }
 }
 
 struct ActionPerformer<'a> {
     actions: &'a mut Vec<ParserAction>,
+    g0_line_drawing: &'a mut bool,
+    g1_line_drawing: &'a mut bool,
+    use_g1: &'a mut bool,
 }
 
 impl vte::Perform for ActionPerformer<'_> {
     fn print(&mut self, ch: char) {
-        self.actions.push(ParserAction::Print(ch));
+        let line_drawing = if *self.use_g1 {
+            *self.g1_line_drawing
+        } else {
+            *self.g0_line_drawing
+        };
+        self.actions
+            .push(ParserAction::Print(map_printed_char(ch, line_drawing)));
     }
 
     fn execute(&mut self, byte: u8) {
@@ -95,6 +132,8 @@ impl vte::Perform for ActionPerformer<'_> {
             b'\r' => self.actions.push(ParserAction::CarriageReturn),
             b'\t' => self.actions.push(ParserAction::Tab),
             0x08 => self.actions.push(ParserAction::Backspace),
+            0x0e => *self.use_g1 = true,
+            0x0f => *self.use_g1 = false,
             _ => {}
         }
     }
@@ -110,9 +149,23 @@ impl vte::Perform for ActionPerformer<'_> {
             return;
         }
 
-        let private = intermediates == b"?";
+        let private = is_private(intermediates);
         if private && matches!(action, 'h' | 'l') {
             self.mode(params, action == 'h');
+            return;
+        }
+        if private && action == 'u' {
+            self.actions
+                .push(ParserAction::Respond(b"\x1b[?0u".to_vec()));
+            return;
+        }
+        if intermediates == b" " && action == 'q' {
+            self.cursor_shape(params);
+            return;
+        }
+        if action == 'p' && intermediates.contains(&b'$') {
+            self.actions
+                .push(ParserAction::ReportMode(param(params, 0, 0)));
             return;
         }
         if !intermediates.is_empty() {
@@ -127,6 +180,16 @@ impl vte::Perform for ActionPerformer<'_> {
             'B' => self.relative(0, amount(params, 0, 1)),
             'C' => self.relative(amount(params, 0, 1), 0),
             'D' => self.relative(-amount(params, 0, 1), 0),
+            'E' => {
+                self.relative(0, amount(params, 0, 1));
+                self.actions
+                    .push(ParserAction::MoveCursor { x: 0, y: u16::MAX });
+            }
+            'F' => {
+                self.relative(0, -amount(params, 0, 1));
+                self.actions
+                    .push(ParserAction::MoveCursor { x: 0, y: u16::MAX });
+            }
             'G' => self.actions.push(ParserAction::MoveCursor {
                 x: param(params, 0, 1).saturating_sub(1),
                 y: u16::MAX,
@@ -159,6 +222,15 @@ impl vte::Perform for ActionPerformer<'_> {
             'X' => self
                 .actions
                 .push(ParserAction::EraseChars(param(params, 0, 1))),
+            'b' => self.actions.push(ParserAction::Repeat(param(params, 0, 1))),
+            'c' => self
+                .actions
+                .push(ParserAction::Respond(b"\x1b[?1;2c".to_vec())),
+            'd' => self.actions.push(ParserAction::MoveCursor {
+                x: u16::MAX,
+                y: param(params, 0, 1).saturating_sub(1),
+            }),
+            'e' => self.relative(0, amount(params, 0, 1)),
             'm' => self.sgr(params),
             'r' => self.actions.push(ParserAction::SetScrollRegion {
                 top: param(params, 0, 1).saturating_sub(1),
@@ -171,16 +243,75 @@ impl vte::Perform for ActionPerformer<'_> {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
-        if ignore || !intermediates.is_empty() {
+        if ignore {
+            return;
+        }
+        if matches!(intermediates, b"(" | b")") && matches!(byte, b'0' | b'B') {
+            let line_drawing = byte == b'0';
+            if intermediates == b"(" {
+                *self.g0_line_drawing = line_drawing;
+            } else {
+                *self.g1_line_drawing = line_drawing;
+            }
+            return;
+        }
+        if !intermediates.is_empty() {
             return;
         }
         match byte {
             b'c' => self.actions.push(ParserAction::Reset),
             b'7' => self.actions.push(ParserAction::SaveCursor),
             b'8' => self.actions.push(ParserAction::RestoreCursor),
+            b'E' => self.actions.push(ParserAction::NextLine),
             b'M' => self.actions.push(ParserAction::ReverseIndex),
             _ => {}
         }
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if matches!(params, [b"11", b"?"]) {
+            self.actions.push(ParserAction::Respond(
+                b"\x1b]11;rgb:1010/1212/1818\x1b\\".to_vec(),
+            ));
+        }
+    }
+}
+
+fn is_private(intermediates: &[u8]) -> bool {
+    intermediates.contains(&b'?')
+}
+
+fn map_printed_char(ch: char, line_drawing: bool) -> char {
+    if !line_drawing {
+        return ch;
+    }
+    match ch {
+        '`' => '◆',
+        'a' => '▒',
+        'f' => '°',
+        'g' => '±',
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'o' => '⎺',
+        'p' => '⎻',
+        'q' => '─',
+        'r' => '⎼',
+        's' => '⎽',
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│',
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
+        '~' => '·',
+        _ => ch,
     }
 }
 
@@ -196,14 +327,8 @@ impl ActionPerformer<'_> {
             return;
         }
 
-        let codes: Vec<_> = params
-            .iter()
-            .flat_map(|param| param.iter())
-            .copied()
-            .collect();
-        let mut index = 0;
-        while index < codes.len() {
-            let code = codes[index];
+        let mut codes = params.iter().flat_map(|param| param.iter()).copied();
+        while let Some(code) = codes.next() {
             match code {
                 0 => self.actions.push(ParserAction::ResetStyle),
                 1 => self
@@ -255,19 +380,17 @@ impl ActionPerformer<'_> {
                         crate::Color::Indexed((code - 100 + 8) as u8),
                     ))),
                 38 | 48 => {
-                    if let Some((color, consumed)) = extended_color(&codes[index + 1..]) {
+                    if let Some(color) = extended_color(&mut codes) {
                         let update = if code == 38 {
                             StyleUpdate::Foreground(color)
                         } else {
                             StyleUpdate::Background(color)
                         };
                         self.actions.push(ParserAction::SetStyle(update));
-                        index += consumed;
                     }
                 }
                 _ => {}
             }
-            index += 1;
         }
     }
 
@@ -276,11 +399,25 @@ impl ActionPerformer<'_> {
             let mode = match code {
                 7 => TerminalMode::Wrap,
                 25 => TerminalMode::CursorVisible,
+                1000 => TerminalMode::MouseTracking(MouseTracking::Click),
+                1002 => TerminalMode::MouseTracking(MouseTracking::Drag),
+                1003 => TerminalMode::MouseTracking(MouseTracking::Any),
+                1006 => TerminalMode::SgrMouse,
+                2026 => TerminalMode::SynchronizedUpdate,
                 47 | 1047 | 1049 => TerminalMode::AlternateScreen,
                 _ => continue,
             };
             self.actions.push(ParserAction::SetMode { mode, enabled });
         }
+    }
+
+    fn cursor_shape(&mut self, params: &vte::Params) {
+        let shape = match param(params, 0, 1) {
+            3 | 4 => crate::CursorShape::Underline,
+            5 | 6 => crate::CursorShape::Beam,
+            _ => crate::CursorShape::Block,
+        };
+        self.actions.push(ParserAction::SetCursorShape(shape));
     }
 }
 
@@ -306,16 +443,15 @@ fn erase_mode(params: &vte::Params) -> EraseMode {
     }
 }
 
-fn extended_color(codes: &[u16]) -> Option<(crate::Color, usize)> {
-    match codes {
-        [5, index, ..] => Some((crate::Color::Indexed((*index).min(u8::MAX as u16) as u8), 2)),
-        [2, r, g, b, ..] => Some((
-            crate::Color::Rgb(
-                (*r).min(u8::MAX as u16) as u8,
-                (*g).min(u8::MAX as u16) as u8,
-                (*b).min(u8::MAX as u16) as u8,
-            ),
-            4,
+fn extended_color(codes: &mut impl Iterator<Item = u16>) -> Option<crate::Color> {
+    match codes.next()? {
+        5 => Some(crate::Color::Indexed(
+            codes.next()?.min(u8::MAX as u16) as u8
+        )),
+        2 => Some(crate::Color::Rgb(
+            codes.next()?.min(u8::MAX as u16) as u8,
+            codes.next()?.min(u8::MAX as u16) as u8,
+            codes.next()?.min(u8::MAX as u16) as u8,
         )),
         _ => None,
     }

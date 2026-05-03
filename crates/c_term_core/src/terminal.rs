@@ -1,17 +1,24 @@
 use crate::{
-    Cursor, DamageBatch, Grid, ParserAction, ParserAdapter, SimpleParser, Style, StyleUpdate,
-    TerminalMode,
+    Cursor, DamageBatch, Grid, MouseTracking, ParserAction, ParserAdapter, SimpleParser, Style,
+    StyleUpdate, TerminalMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreTick {
     pub damage: DamageBatch,
+    pub output: Vec<u8>,
 }
 
 impl CoreTick {
     pub fn is_idle(&self) -> bool {
         self.damage.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseState {
+    pub tracking: MouseTracking,
+    pub sgr: bool,
 }
 
 #[derive(Debug)]
@@ -21,6 +28,9 @@ pub struct TerminalCore<P = SimpleParser> {
     parser: P,
     style: Style,
     saved_cursor: Option<Cursor>,
+    last_printed: char,
+    mouse: MouseState,
+    output: Vec<u8>,
 }
 
 impl TerminalCore<SimpleParser> {
@@ -40,11 +50,25 @@ where
             parser,
             style: Style::default(),
             saved_cursor: None,
+            last_printed: ' ',
+            mouse: MouseState::default(),
+            output: Vec::new(),
         }
     }
 
     pub fn grid(&self) -> &Grid {
         &self.grid
+    }
+
+    pub fn mouse(&self) -> MouseState {
+        self.mouse
+    }
+
+    pub fn disable_synchronized_update(&mut self) {
+        if self.grid.is_synchronized() {
+            self.grid.set_synchronized(false);
+            self.grid.invalidate();
+        }
     }
 
     pub fn resize(&mut self, width: u16, height: u16) -> CoreTick {
@@ -73,9 +97,19 @@ where
         match action {
             ParserAction::Print(ch) => {
                 let _ = self.grid.put_char(ch, self.style);
+                self.last_printed = ch;
+            }
+            ParserAction::Repeat(count) => {
+                for _ in 0..count {
+                    let _ = self.grid.put_char(self.last_printed, self.style);
+                }
             }
             ParserAction::Tab => self.grid.put_tab(self.style),
             ParserAction::LineFeed => {
+                let _ = self.grid.put_char('\n', self.style);
+            }
+            ParserAction::NextLine => {
+                let _ = self.grid.move_cursor(0, self.grid.cursor().y);
                 let _ = self.grid.put_char('\n', self.style);
             }
             ParserAction::CarriageReturn => {
@@ -100,6 +134,7 @@ where
             }
             ParserAction::MoveCursor { x, y } => {
                 let cursor = self.grid.cursor();
+                let x = if x == u16::MAX { cursor.x } else { x };
                 let y = if y == u16::MAX { cursor.y } else { y };
                 let _ = self.grid.move_cursor(x, y);
             }
@@ -116,7 +151,10 @@ where
             ParserAction::ScrollUp(count) => self.grid.scroll_up(count),
             ParserAction::ScrollDown(count) => self.grid.scroll_down(count),
             ParserAction::SetMode { mode, enabled } => self.set_mode(mode, enabled),
+            ParserAction::SetCursorShape(shape) => self.grid.set_cursor_shape(shape),
             ParserAction::SetStyle(update) => self.apply_style(update),
+            ParserAction::ReportMode(mode) => self.report_mode(mode),
+            ParserAction::Respond(bytes) => self.output.extend(bytes),
             ParserAction::ResetStyle => self.style = Style::default(),
         }
     }
@@ -149,6 +187,17 @@ where
                 }
             }
             TerminalMode::CursorVisible => self.grid.set_cursor_visible(enabled),
+            TerminalMode::MouseTracking(tracking) => {
+                self.mouse.tracking = if enabled {
+                    tracking
+                } else if self.mouse.tracking == tracking {
+                    MouseTracking::None
+                } else {
+                    self.mouse.tracking
+                };
+            }
+            TerminalMode::SgrMouse => self.mouse.sgr = enabled,
+            TerminalMode::SynchronizedUpdate => self.grid.set_synchronized(enabled),
             TerminalMode::Wrap => self.grid.set_wrap(enabled),
         }
     }
@@ -160,11 +209,29 @@ where
         self.alternate_grid = None;
         self.style = Style::default();
         self.saved_cursor = None;
+        self.last_printed = ' ';
+        self.mouse = MouseState::default();
+    }
+
+    fn report_mode(&mut self, mode: u16) {
+        let status = match mode {
+            2026 => {
+                if self.grid.is_synchronized() {
+                    1
+                } else {
+                    2
+                }
+            }
+            _ => 0,
+        };
+        self.output
+            .extend(format!("\x1b[?{mode};{status}$y").as_bytes());
     }
 
     fn tick(&mut self) -> CoreTick {
         CoreTick {
             damage: self.grid.drain_damage(),
+            output: std::mem::take(&mut self.output),
         }
     }
 }
@@ -331,12 +398,69 @@ mod tests {
     #[test]
     fn line_feed_scrolls_at_bottom() {
         let mut terminal = TerminalCore::new(3, 2);
-        let _ = terminal.process_pty_input(b"ab\ncd\nef");
+        let _ = terminal.process_pty_input(b"ab\r\ncd\r\nef");
 
         assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'c');
         assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'd');
         assert_eq!(terminal.grid().cell(0, 1).unwrap().ch, 'e');
         assert_eq!(terminal.grid().cell(1, 1).unwrap().ch, 'f');
+    }
+
+    #[test]
+    fn line_feed_preserves_column_without_carriage_return() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let _ = terminal.process_pty_input(b"ab\nc");
+
+        assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'b');
+        assert_eq!(terminal.grid().cell(2, 1).unwrap().ch, 'c');
+    }
+
+    #[test]
+    fn next_line_moves_to_column_zero() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let _ = terminal.process_pty_input(b"ab\x1bEc");
+
+        assert_eq!(terminal.grid().cell(0, 1).unwrap().ch, 'c');
+    }
+
+    #[test]
+    fn last_column_wrap_is_deferred_until_next_print() {
+        let mut terminal = TerminalCore::new(3, 2);
+        let _ = terminal.process_pty_input(b"abc");
+
+        assert_eq!(row_text(terminal.grid(), 0), "abc");
+        assert_eq!(terminal.grid().cursor().x, 2);
+        assert_eq!(terminal.grid().cursor().y, 0);
+
+        let _ = terminal.process_pty_input(b"d");
+
+        assert_eq!(row_text(terminal.grid(), 0), "abc");
+        assert_eq!(row_text(terminal.grid(), 1), "d  ");
+        assert_eq!(terminal.grid().cursor().x, 1);
+        assert_eq!(terminal.grid().cursor().y, 1);
+    }
+
+    #[test]
+    fn wide_characters_leave_spacer_cells() {
+        let mut terminal = TerminalCore::new(4, 1);
+        let _ = terminal.process_pty_input("表x".as_bytes());
+
+        assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, '表');
+        assert!(terminal.grid().cell(0, 0).unwrap().wide);
+        assert!(terminal.grid().cell(1, 0).unwrap().spacer);
+        assert_eq!(terminal.grid().cell(2, 0).unwrap().ch, 'x');
+    }
+
+    #[test]
+    fn writing_over_wide_spacer_clears_the_leading_cell() {
+        let mut terminal = TerminalCore::new(4, 1);
+        let _ = terminal.process_pty_input("表\x1b[1;2Hx".as_bytes());
+
+        assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, ' ');
+        assert!(!terminal.grid().cell(0, 0).unwrap().wide);
+        assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'x');
+        assert!(!terminal.grid().cell(1, 0).unwrap().spacer);
     }
 
     #[test]
@@ -368,7 +492,7 @@ mod tests {
     #[test]
     fn scroll_region_limits_line_feed_scrolling() {
         let mut terminal = TerminalCore::new(3, 3);
-        let _ = terminal.process_pty_input(b"aa\nbb\ncc\x1b[2;3r\x1b[3;1H\nDD");
+        let _ = terminal.process_pty_input(b"aa\r\nbb\r\ncc\x1b[2;3r\x1b[3;1H\r\nDD");
 
         assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
         assert_eq!(terminal.grid().cell(0, 1).unwrap().ch, 'c');
@@ -396,6 +520,90 @@ mod tests {
         let _ = terminal.process_pty_input(b"\x1b[?25l");
 
         assert!(!terminal.grid().cursor().visible);
+    }
+
+    #[test]
+    fn cursor_shape_sequence_updates_grid_cursor() {
+        let mut terminal = TerminalCore::new(2, 1);
+
+        let _ = terminal.process_pty_input(b"\x1b[6 q");
+        assert_eq!(terminal.grid().cursor().shape, crate::CursorShape::Beam);
+
+        let _ = terminal.process_pty_input(b"\x1b[4 q");
+        assert_eq!(
+            terminal.grid().cursor().shape,
+            crate::CursorShape::Underline
+        );
+
+        let _ = terminal.process_pty_input(b"\x1b[2 q");
+        assert_eq!(terminal.grid().cursor().shape, crate::CursorShape::Block);
+    }
+
+    #[test]
+    fn synchronized_update_mode_is_tracked() {
+        let mut terminal = TerminalCore::new(2, 1);
+
+        let _ = terminal.process_pty_input(b"\x1b[?2026h");
+        assert!(terminal.grid().is_synchronized());
+
+        let _ = terminal.process_pty_input(b"\x1b[?2026l");
+        assert!(!terminal.grid().is_synchronized());
+    }
+
+    #[test]
+    fn mouse_modes_are_tracked() {
+        let mut terminal = TerminalCore::new(2, 1);
+
+        let _ = terminal.process_pty_input(b"\x1b[?1000;1006h");
+        assert_eq!(terminal.mouse().tracking, MouseTracking::Click);
+        assert!(terminal.mouse().sgr);
+
+        let _ = terminal.process_pty_input(b"\x1b[?1000l");
+        assert_eq!(terminal.mouse().tracking, MouseTracking::None);
+        assert!(terminal.mouse().sgr);
+
+        let _ = terminal.process_pty_input(b"\x1b[?1006l");
+        assert!(!terminal.mouse().sgr);
+    }
+
+    #[test]
+    fn repeat_sequence_reprints_previous_character() {
+        let mut terminal = TerminalCore::new(6, 1);
+        let _ = terminal.process_pty_input(b"A\x1b[3b");
+
+        assert_eq!(row_text(terminal.grid(), 0), "AAAA  ");
+    }
+
+    #[test]
+    fn terminal_queries_emit_pty_responses() {
+        let mut terminal = TerminalCore::new(2, 1);
+
+        assert_eq!(terminal.process_pty_input(b"\x1b[c").output, b"\x1b[?1;2c");
+        assert_eq!(terminal.process_pty_input(b"\x1b[?u").output, b"\x1b[?0u");
+        assert_eq!(
+            terminal.process_pty_input(b"\x1b[?2026$p").output,
+            b"\x1b[?2026;2$y"
+        );
+        assert_eq!(
+            terminal.process_pty_input(b"\x1b]11;?\x07").output,
+            b"\x1b]11;rgb:1010/1212/1818\x1b\\"
+        );
+    }
+
+    #[test]
+    fn dec_special_graphics_map_tmux_line_drawing() {
+        let mut terminal = TerminalCore::new(8, 1);
+        let _ = terminal.process_pty_input(b"\x1b(0lqkxmj\x1b(Bq");
+
+        assert_eq!(row_text(terminal.grid(), 0), "┌─┐│└┘q ");
+    }
+
+    #[test]
+    fn dec_g1_special_graphics_shift_in_and_out() {
+        let mut terminal = TerminalCore::new(5, 1);
+        let _ = terminal.process_pty_input(b"\x1b)0\x0ex\x0fq");
+
+        assert_eq!(row_text(terminal.grid(), 0), "│q   ");
     }
 
     #[test]

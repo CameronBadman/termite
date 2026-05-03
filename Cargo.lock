@@ -202,6 +202,7 @@ dependencies = [
 name = "c_term_core"
 version = "0.1.0"
 dependencies = [
+ "unicode-width",
  "vte",
 ]
 
