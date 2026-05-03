@@ -299,6 +299,7 @@ struct CursorTrail {
     config: CursorTrailConfig,
     last_cursor: Option<Cursor>,
     last_change: Instant,
+    last_generation: Option<u64>,
     trails: Vec<Trail>,
 }
 
@@ -314,17 +315,29 @@ impl CursorTrail {
             config,
             last_cursor: None,
             last_change: Instant::now(),
+            last_generation: None,
             trails: Vec::new(),
         }
     }
 
-    fn observe_cursor(&mut self, cursor: Cursor, now: Instant) {
+    fn observe_cursor(&mut self, grid: &Grid, now: Instant) {
+        let cursor = grid.cursor();
+        let generation = grid.generation();
         let Some(last) = self.last_cursor else {
             self.last_cursor = Some(cursor);
+            self.last_generation = Some(generation);
             self.last_change = now;
             return;
         };
+        if self.is_large_redraw(grid, last, cursor) {
+            self.last_cursor = Some(cursor);
+            self.last_generation = Some(generation);
+            self.last_change = now;
+            self.trails.clear();
+            return;
+        }
         if last == cursor {
+            self.last_generation = Some(generation);
             return;
         }
 
@@ -341,7 +354,23 @@ impl CursorTrail {
             });
         }
         self.last_cursor = Some(cursor);
+        self.last_generation = Some(generation);
         self.last_change = now;
+    }
+
+    fn is_large_redraw(&self, grid: &Grid, last_cursor: Cursor, cursor: Cursor) -> bool {
+        let Some(last_generation) = self.last_generation else {
+            return false;
+        };
+        if grid.generation() < last_generation {
+            return true;
+        }
+        if grid.generation() == last_generation && last_cursor != cursor {
+            return true;
+        }
+        let cells = u64::from(grid.width()) * u64::from(grid.height());
+        let threshold = (cells / 6).max(64);
+        grid.generation().saturating_sub(last_generation) > threshold
     }
 
     fn draw_trails(&mut self, frame: &mut PluginFrame<'_>) {
@@ -355,50 +384,50 @@ impl CursorTrail {
             let age = frame.now.duration_since(trail.started);
             let raw = (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
             let progress = ease_out_quart(raw);
-            let fade = (1.0 - raw).powf(0.75);
+            let fade = 1.0 - raw;
             let start = (progress - self.config.length).max(0.0);
             let tail = cursor_point(trail.from, trail.to, start);
             let head = cursor_point(trail.from, trail.to, progress);
             if progress > start {
-                let dark_alpha = (52.0 * fade) as u8;
-                let rim_alpha = (190.0 * fade) as u8;
-                let core_alpha = (210.0 * fade) as u8;
+                let dark_alpha = (74.0 * fade) as u8;
+                let rim_alpha = (225.0 * fade) as u8;
+                let core_alpha = (235.0 * fade) as u8;
                 frame.blend_capsule(
                     tail,
                     head,
-                    CELL_HEIGHT as f32 * 0.20,
+                    CELL_HEIGHT as f32 * 0.24,
                     [4, 8, 12],
                     dark_alpha,
                 );
-                frame.blend_capsule_ring(tail, head, CELL_HEIGHT as f32 * 0.18, edge, rim_alpha);
+                frame.blend_capsule_ring(tail, head, CELL_HEIGHT as f32 * 0.22, edge, rim_alpha);
                 frame.blend_capsule(
                     tail,
                     head,
-                    CELL_HEIGHT as f32 * 0.075,
+                    CELL_HEIGHT as f32 * 0.12,
                     self.config.color,
                     core_alpha,
                 );
                 frame.blend_capsule(
                     tail,
                     head,
-                    CELL_HEIGHT as f32 * 0.026,
+                    CELL_HEIGHT as f32 * 0.04,
                     hot,
-                    (130.0 * fade) as u8,
+                    (150.0 * fade) as u8,
                 );
             }
             let (x, y) = cursor_point(trail.from, trail.to, progress);
             frame.blend_cursor_glow(x, y, 0.92, self.config.color, (24.0 * fade) as u8);
-            frame.blend_cursor_edge(x, y, 0.92, [4, 8, 12], (54.0 * fade) as u8);
-            frame.blend_cursor_edge(x, y, 0.78, edge, (145.0 * fade) as u8);
-            frame.blend_cursor_at(x, y, 0.68, self.config.color, (240.0 * fade) as u8);
-            frame.blend_cursor_at(x, y, 0.24, hot, (210.0 * fade) as u8);
+            frame.blend_cursor_edge(x, y, 0.98, [4, 8, 12], (72.0 * fade) as u8);
+            frame.blend_cursor_edge(x, y, 0.84, edge, (180.0 * fade) as u8);
+            frame.blend_cursor_at(x, y, 0.78, self.config.color, (250.0 * fade) as u8);
+            frame.blend_cursor_at(x, y, 0.30, hot, (220.0 * fade) as u8);
         }
     }
 }
 
 impl Plugin for CursorTrail {
     fn draw(&mut self, frame: &mut PluginFrame<'_>) -> bool {
-        self.observe_cursor(frame.grid.cursor(), frame.now);
+        self.observe_cursor(frame.grid, frame.now);
         self.draw_trails(frame);
         !self.trails.is_empty()
     }
@@ -511,6 +540,70 @@ mod tests {
             &mut bytes,
             start + Duration::from_millis(1),
         )));
+    }
+
+    #[test]
+    fn cursor_trail_ignores_large_redraw_jump() {
+        let config = CursorTrailConfig {
+            hold_ms: 0,
+            decay_ms: 300,
+            threshold: 1,
+            length: 1.0,
+            color: [255, 0, 0],
+        };
+        let mut terminal = TerminalCore::new(20, 5);
+        let mut plugin = CursorTrail::new(config);
+        let start = Instant::now();
+        let mut bytes = vec![10; 20 * CELL_WIDTH as usize * 5 * CELL_HEIGHT as usize * 4];
+
+        assert!(!plugin.draw(&mut PluginFrame {
+            frame: &mut bytes,
+            width_px: 20 * CELL_WIDTH as usize,
+            grid: terminal.grid(),
+            now: start,
+        }));
+
+        let _ = terminal.process_pty_input(
+            b"aaaaaaaaaaaaaaaaaaa\x1b[2;1Hbbbbbbbbbbbbbbbbbbb\x1b[3;1Hccccccccccccccccccc\x1b[5;20H",
+        );
+
+        assert!(!plugin.draw(&mut PluginFrame {
+            frame: &mut bytes,
+            width_px: 20 * CELL_WIDTH as usize,
+            grid: terminal.grid(),
+            now: start + Duration::from_millis(1),
+        }));
+    }
+
+    #[test]
+    fn cursor_trail_ignores_fresh_grid_cursor_jump() {
+        let config = CursorTrailConfig {
+            hold_ms: 0,
+            decay_ms: 300,
+            threshold: 1,
+            length: 1.0,
+            color: [255, 0, 0],
+        };
+        let mut terminal = TerminalCore::new(20, 5);
+        let mut plugin = CursorTrail::new(config);
+        let start = Instant::now();
+        let mut bytes = vec![10; 20 * CELL_WIDTH as usize * 5 * CELL_HEIGHT as usize * 4];
+
+        let _ = terminal.process_pty_input(b"\x1b[1;10H");
+        assert!(!plugin.draw(&mut PluginFrame {
+            frame: &mut bytes,
+            width_px: 20 * CELL_WIDTH as usize,
+            grid: terminal.grid(),
+            now: start,
+        }));
+
+        let _ = terminal.process_pty_input(b"\x1b[?1049h");
+        assert!(!plugin.draw(&mut PluginFrame {
+            frame: &mut bytes,
+            width_px: 20 * CELL_WIDTH as usize,
+            grid: terminal.grid(),
+            now: start + Duration::from_millis(1),
+        }));
     }
 
     #[test]

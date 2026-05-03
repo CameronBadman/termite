@@ -27,8 +27,8 @@ impl Default for AppConfig {
 impl Default for CursorTrailConfig {
     fn default() -> Self {
         Self {
-            hold_ms: 25,
-            decay_ms: 360,
+            hold_ms: 20,
+            decay_ms: 280,
             threshold: 2,
             length: 1.0,
             color: [104, 247, 255],
