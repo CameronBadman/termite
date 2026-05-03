@@ -12,6 +12,16 @@ use super::{
 const MAX_OVERLAYS: usize = 16;
 const OVERLAY_BYTES: usize = 64;
 
+fn select_alpha_mode(modes: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlphaMode {
+    if modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        wgpu::CompositeAlphaMode::PreMultiplied
+    } else if modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        wgpu::CompositeAlphaMode::PostMultiplied
+    } else {
+        wgpu::CompositeAlphaMode::Auto
+    }
+}
+
 pub(super) struct GpuRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -24,6 +34,7 @@ pub(super) struct GpuRenderer {
     cursor_buffer: wgpu::Buffer,
     overlay_buffer: wgpu::Buffer,
     overlay_bytes: [u8; MAX_OVERLAYS * OVERLAY_BYTES],
+    premultiply_alpha: bool,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
 }
@@ -51,9 +62,12 @@ impl GpuRenderer {
             }))?;
         let surface_width = surface_size.width.max(1);
         let surface_height = surface_size.height.max(1);
-        let config = surface
+        let caps = surface.get_capabilities(&adapter);
+        let mut config = surface
             .get_default_config(&adapter, surface_width, surface_height)
             .ok_or("surface is not supported by the selected GPU adapter")?;
+        config.alpha_mode = select_alpha_mode(&caps.alpha_modes);
+        let premultiply_alpha = config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -123,6 +137,7 @@ impl GpuRenderer {
             cursor_buffer,
             overlay_buffer,
             overlay_bytes: [0; MAX_OVERLAYS * OVERLAY_BYTES],
+            premultiply_alpha,
             bind_group,
             pipeline,
         })
@@ -167,13 +182,19 @@ impl GpuRenderer {
         update: &TextureUpdate,
         cursor: [f32; 4],
         overlays: &[OverlayCommand],
+        screen_opacity: f32,
     ) -> Result<(), &'static str> {
         let expected_len = self.texture_width as usize * self.texture_height as usize * 4;
         if frame.len() != expected_len {
             return Err("frame size does not match GPU texture size");
         }
 
-        self.write_globals(cursor, overlays.len().min(MAX_OVERLAYS));
+        self.write_globals(
+            cursor,
+            overlays.len().min(MAX_OVERLAYS),
+            screen_opacity,
+            self.premultiply_alpha,
+        );
         self.write_overlays(overlays);
         if update.full {
             self.write_frame(frame);
@@ -185,12 +206,20 @@ impl GpuRenderer {
         self.present()
     }
 
-    fn write_globals(&self, cursor: [f32; 4], overlay_count: usize) {
+    fn write_globals(
+        &self,
+        cursor: [f32; 4],
+        overlay_count: usize,
+        screen_opacity: f32,
+        premultiply_alpha: bool,
+    ) {
         let mut bytes = [0_u8; 32];
         for (chunk, value) in bytes[..16].chunks_exact_mut(4).zip(cursor) {
             chunk.copy_from_slice(&value.to_ne_bytes());
         }
         bytes[16..20].copy_from_slice(&(overlay_count as f32).to_ne_bytes());
+        bytes[20..24].copy_from_slice(&screen_opacity.clamp(0.0, 1.0).to_ne_bytes());
+        bytes[24..28].copy_from_slice(&(premultiply_alpha as u8 as f32).to_ne_bytes());
         self.queue.write_buffer(&self.cursor_buffer, 0, &bytes);
     }
 
@@ -381,7 +410,7 @@ impl GpuRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -627,6 +656,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         pixel.x >= rect.x && pixel.x < rect.x + rect.z &&
         pixel.y >= rect.y && pixel.y < rect.y + rect.w) {
         color = vec4<f32>(vec3<f32>(1.0) - color.rgb, color.a);
+    }
+    let screen_alpha = clamp(globals.overlay.y, 0.0, 1.0);
+    color = vec4<f32>(color.rgb, color.a * screen_alpha);
+    if (globals.overlay.z > 0.5) {
+        return vec4<f32>(color.rgb * color.a, color.a);
     }
     return color;
 }

@@ -8,10 +8,10 @@ type Point = (f32, f32);
 
 mod cursor_line;
 mod cursor_trail;
-mod screen_tint;
+mod screen_opacity;
 pub(crate) use cursor_line::{CursorLine, CursorLineConfig};
 pub(crate) use cursor_trail::{CursorTrail, CursorTrailColor, CursorTrailConfig};
-pub(crate) use screen_tint::{ScreenTint, ScreenTintConfig};
+pub(crate) use screen_opacity::{ScreenOpacity, ScreenOpacityConfig};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum OverlayKind {
@@ -32,9 +32,14 @@ pub(crate) struct PluginFrame<'a> {
     pub(crate) grid: &'a Grid,
     pub(crate) now: Instant,
     pub(crate) overlays: Vec<OverlayCommand>,
+    pub(crate) screen_opacity: f32,
 }
 
 impl PluginFrame<'_> {
+    pub(crate) fn set_screen_opacity(&mut self, opacity: f32) {
+        self.screen_opacity = opacity.clamp(0.0, 1.0);
+    }
+
     pub(crate) fn overlay_cell(&mut self, x: u16, y: u16, color: [u8; 3], alpha: u8) {
         self.push_rect(
             usize::from(x) * cell_width(),
@@ -70,17 +75,6 @@ impl PluginFrame<'_> {
             usize::from(y) * cell_height(),
             usize::from(self.grid.width()) * cell_width(),
             cell_height(),
-            color,
-            alpha,
-        );
-    }
-
-    pub(crate) fn overlay_screen(&mut self, color: [u8; 3], alpha: u8) {
-        self.push_rect(
-            0,
-            0,
-            usize::from(self.grid.width()) * cell_width(),
-            usize::from(self.grid.height()) * cell_height(),
             color,
             alpha,
         );
@@ -159,6 +153,7 @@ mod tests {
             grid: terminal.grid(),
             now,
             overlays: Vec::new(),
+            screen_opacity: 1.0,
         }
     }
 
@@ -166,7 +161,7 @@ mod tests {
     fn configured_plugins_emit_overlays() {
         let terminal = TerminalCore::new(4, 1);
         let mut host = PluginHost::new();
-        host.add(ScreenTint::default());
+        host.add(ScreenOpacity::default());
         host.add(CursorLine::default());
         host.add(CursorTrail::new(CursorTrailConfig::default()));
         let mut frame = frame_for(&terminal, Instant::now());
@@ -174,5 +169,6 @@ mod tests {
         host.draw(&mut frame);
 
         assert!(!frame.overlays.is_empty());
+        assert!(frame.screen_opacity < 1.0);
     }
 }

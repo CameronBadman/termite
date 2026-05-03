@@ -1,6 +1,6 @@
 use crate::{
     plugins::{CursorLine, CursorLineConfig, CursorTrail, CursorTrailColor, CursorTrailConfig},
-    plugins::{ScreenTint, ScreenTintConfig},
+    plugins::{ScreenOpacity, ScreenOpacityConfig},
     runner::{Runner, RunnerPart, bitmap_font, font_file, parts},
 };
 
@@ -21,20 +21,17 @@ fn terminal_font() -> impl RunnerPart {
 
 fn terminal_plugins() -> impl RunnerPart {
     parts()
-        .with(screen_tint_plugin())
+        .with(screen_opacity_plugin())
         .with(cursor_line_plugin())
         .with(cursor_trail_plugin())
 }
 
-fn screen_tint_plugin() -> ScreenTint {
-    ScreenTint::new(screen_tint_config())
+fn screen_opacity_plugin() -> ScreenOpacity {
+    ScreenOpacity::new(screen_opacity_config())
 }
 
-fn screen_tint_config() -> ScreenTintConfig {
-    ScreenTintConfig {
-        color: [0, 0, 0],
-        alpha: 6,
-    }
+fn screen_opacity_config() -> ScreenOpacityConfig {
+    ScreenOpacityConfig { opacity: 0.86 }
 }
 
 fn cursor_line_plugin() -> CursorLine {
@@ -71,7 +68,7 @@ mod tests {
 
     fn nested_plugins() -> impl RunnerPart {
         parts()
-            .with(parts().with(screen_tint_plugin()))
+            .with(parts().with(screen_opacity_plugin()))
             .with(parts().with(cursor_line_plugin()))
             .with(parts().with(cursor_trail_plugin()))
     }
@@ -79,7 +76,7 @@ mod tests {
     #[test]
     fn runner_config_can_compose_plugin_groups() {
         let runner = Runner::new()
-            .with(parts().with(screen_tint_plugin()))
+            .with(parts().with(screen_opacity_plugin()))
             .with(parts().with(cursor_line_plugin()))
             .with(parts().with(cursor_trail_plugin()));
 

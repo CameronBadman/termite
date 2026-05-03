@@ -404,6 +404,7 @@ mod tests {
             grid: terminal.grid(),
             now,
             overlays: Vec::new(),
+            screen_opacity: 1.0,
         }
     }
 

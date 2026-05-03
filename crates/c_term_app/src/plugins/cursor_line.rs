@@ -67,6 +67,7 @@ mod tests {
             grid: terminal.grid(),
             now: Instant::now(),
             overlays: Vec::new(),
+            screen_opacity: 1.0,
         };
 
         assert!(!plugin.draw(&mut frame));

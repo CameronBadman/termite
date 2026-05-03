@@ -121,6 +121,7 @@ impl WindowBackend {
             event_loop.create_window(
                 Window::default_attributes()
                     .with_title("c-term")
+                    .with_transparent(true)
                     .with_inner_size(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT))
                     .with_min_inner_size(LogicalSize::new(320, 200)),
             )?,
@@ -455,16 +456,17 @@ impl WindowBackend {
             return;
         };
 
-        let (plugin_active, overlays) = if !viewing_history {
+        let (plugin_active, overlays, screen_opacity) = if !viewing_history {
             let mut plugin_frame = PluginFrame {
                 grid: terminal.grid(),
                 now: render_started,
                 overlays: Vec::new(),
+                screen_opacity: 1.0,
             };
             let active = self.plugins.draw(&mut plugin_frame);
-            (active, plugin_frame.overlays)
+            (active, plugin_frame.overlays, plugin_frame.screen_opacity)
         } else {
-            (false, Vec::new())
+            (false, Vec::new(), 1.0)
         };
         let cursor = if viewing_history {
             [0.0, 0.0, 0.0, 0.0]
@@ -476,6 +478,7 @@ impl WindowBackend {
             &texture_update,
             cursor,
             &overlays,
+            screen_opacity,
         ) {
             eprintln!("c-term: GPU render failed: {error}");
         }
