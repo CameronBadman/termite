@@ -1,9 +1,8 @@
 use std::{
     error::Error,
-    io::{self, Read, Write},
+    io::Write,
     os::fd::AsRawFd,
     sync::Arc,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -25,6 +24,7 @@ use crate::{
 
 mod gpu;
 mod input;
+mod pty_events;
 mod render_cache;
 mod text;
 
@@ -33,6 +33,7 @@ use input::{
     active_mouse_button, encode_mouse_event, encode_window_key, mouse_button_code, mouse_cell,
     wheel_codes, wheel_scroll_lines,
 };
+use pty_events::{UserEvent, spawn_pty_reader};
 use render_cache::RenderCache;
 
 pub(crate) const CELL_WIDTH: u32 = 8;
@@ -44,12 +45,6 @@ const DELAYED_RENDER_UPPER_NS: u64 = 4_000_000;
 const APP_SYNC_TIMEOUT_MS: u64 = 1_000;
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 540;
-
-#[derive(Debug)]
-enum UserEvent {
-    PtyBytes(Vec<u8>),
-    ChildExited,
-}
 
 pub(crate) fn run(runner: Runner) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
@@ -589,30 +584,6 @@ impl ApplicationHandler<UserEvent> for WindowBackend {
             _ => {}
         }
     }
-}
-
-fn spawn_pty_reader(child: &mut PtyChild, proxy: EventLoopProxy<UserEvent>) -> io::Result<()> {
-    let mut reader = child.master.try_clone()?;
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let n = match reader.read(&mut buffer) {
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(0) | Err(_) => {
-                    let _ = proxy.send_event(UserEvent::ChildExited);
-                    break;
-                }
-                Ok(n) => n,
-            };
-            if proxy
-                .send_event(UserEvent::PtyBytes(buffer[..n].to_vec()))
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-    Ok(())
 }
 
 fn grid_size(size: PhysicalSize<u32>) -> (u16, u16) {
