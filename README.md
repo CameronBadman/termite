@@ -35,9 +35,9 @@ The repo includes a ready-to-copy `config.example`.
 ```conf
 plugin cursor_line
 plugin cursor_trail
-cursor_trail_hold_ms 50
-cursor_trail_decay_ms 340
+cursor_trail_hold_ms 35
+cursor_trail_decay_ms 520
 cursor_trail_threshold 2
-cursor_trail_length 0.62
-cursor_trail_color #ffcd60
+cursor_trail_length 0.82
+cursor_trail_color #68f7ff
 ```

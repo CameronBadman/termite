@@ -80,6 +80,32 @@ impl PluginFrame<'_> {
         )
     }
 
+    pub(crate) fn blend_capsule(
+        &mut self,
+        from: (f32, f32),
+        to: (f32, f32),
+        radius: f32,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        self.blend_capsule_with(from, to, radius, color, alpha, |distance| {
+            1.0 - smoothstep(0.58, 1.0, distance)
+        });
+    }
+
+    pub(crate) fn blend_capsule_ring(
+        &mut self,
+        from: (f32, f32),
+        to: (f32, f32),
+        radius: f32,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        self.blend_capsule_with(from, to, radius, color, alpha, |distance| {
+            smoothstep(0.48, 0.72, distance) * (1.0 - smoothstep(0.84, 1.0, distance))
+        });
+    }
+
     pub(crate) fn blend_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
         self.blend_rect(
             0,
@@ -190,6 +216,40 @@ impl PluginFrame<'_> {
             }
         }
     }
+
+    fn blend_capsule_with(
+        &mut self,
+        from: (f32, f32),
+        to: (f32, f32),
+        radius: f32,
+        color: [u8; 3],
+        alpha: u8,
+        opacity: impl Fn(f32) -> f32,
+    ) {
+        if self.width_px == 0 || radius <= 0.0 {
+            return;
+        }
+        let height_px = self.frame.len() / self.width_px / 4;
+        let x_start = (from.0.min(to.0) - radius).floor().max(0.0) as usize;
+        let y_start = (from.1.min(to.1) - radius).floor().max(0.0) as usize;
+        let x_end = (from.0.max(to.0) + radius).ceil().min(self.width_px as f32) as usize;
+        let y_end = (from.1.max(to.1) + radius).ceil().min(height_px as f32) as usize;
+
+        for py in y_start..y_end {
+            for px in x_start..x_end {
+                let distance =
+                    distance_to_segment(px as f32 + 0.5, py as f32 + 0.5, from, to) / radius;
+                if distance > 1.0 {
+                    continue;
+                }
+                let local_alpha = (alpha as f32 * opacity(distance).clamp(0.0, 1.0)) as u8;
+                if local_alpha == 0 {
+                    continue;
+                }
+                blend_pixel(self.frame, self.width_px, px, py, color, local_alpha);
+            }
+        }
+    }
 }
 
 pub(crate) trait Plugin {
@@ -289,29 +349,49 @@ impl CursorTrail {
         self.trails
             .retain(|trail| frame.now.duration_since(trail.started) < decay);
 
-        let edge = lift_color(self.config.color, 1.35, 24);
+        let edge = lift_color(self.config.color, 1.25, 28);
+        let hot = lift_color(self.config.color, 1.8, 64);
         for trail in &self.trails {
             let age = frame.now.duration_since(trail.started);
             let raw = (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
             let progress = ease_out_quart(raw);
-            let fade = (1.0 - raw).powf(0.85);
-            let start = (progress - self.config.length * (0.65 + 0.35 * fade)).max(0.0);
-            for sample in 0..36 {
-                let sample_progress = sample as f32 / 35.0;
-                let t = start + (progress - start) * sample_progress;
-                let (x, y) = cursor_point(trail.from, trail.to, t);
-                let tail = sample_progress.powf(1.35);
-                let alpha = (150.0 * fade * tail).clamp(0.0, 150.0) as u8;
-                let scale = 0.55 + tail * 0.55;
-                frame.blend_cursor_glow(x, y, scale * 1.35, self.config.color, alpha / 5);
-                frame.blend_cursor_edge(x, y, scale * 1.08, [8, 10, 12], alpha / 10);
-                frame.blend_cursor_edge(x, y, scale, edge, alpha / 3);
-                frame.blend_cursor_at(x, y, scale, self.config.color, alpha);
+            let fade = (1.0 - raw).powf(0.55);
+            let start = (progress - self.config.length * (0.72 + 0.28 * fade)).max(0.0);
+            let tail = cursor_point(trail.from, trail.to, start);
+            let head = cursor_point(trail.from, trail.to, progress);
+            if progress > start {
+                let dark_alpha = (70.0 * fade) as u8;
+                let rim_alpha = (170.0 * fade) as u8;
+                let core_alpha = (185.0 * fade) as u8;
+                frame.blend_capsule(
+                    tail,
+                    head,
+                    CELL_HEIGHT as f32 * 0.30,
+                    [4, 8, 12],
+                    dark_alpha,
+                );
+                frame.blend_capsule_ring(tail, head, CELL_HEIGHT as f32 * 0.28, edge, rim_alpha);
+                frame.blend_capsule(
+                    tail,
+                    head,
+                    CELL_HEIGHT as f32 * 0.15,
+                    self.config.color,
+                    core_alpha,
+                );
+                frame.blend_capsule(
+                    tail,
+                    head,
+                    CELL_HEIGHT as f32 * 0.045,
+                    hot,
+                    (105.0 * fade) as u8,
+                );
             }
             let (x, y) = cursor_point(trail.from, trail.to, progress);
-            frame.blend_cursor_edge(x, y, 1.18, [8, 10, 12], (42.0 * fade) as u8);
-            frame.blend_cursor_edge(x, y, 1.08, edge, (90.0 * fade) as u8);
-            frame.blend_cursor_at(x, y, 1.08, self.config.color, (210.0 * fade) as u8);
+            frame.blend_cursor_glow(x, y, 1.28, self.config.color, (38.0 * fade) as u8);
+            frame.blend_cursor_edge(x, y, 1.18, [4, 8, 12], (70.0 * fade) as u8);
+            frame.blend_cursor_edge(x, y, 1.06, edge, (150.0 * fade) as u8);
+            frame.blend_cursor_at(x, y, 0.96, self.config.color, (235.0 * fade) as u8);
+            frame.blend_cursor_at(x, y, 0.42, hot, (180.0 * fade) as u8);
         }
     }
 }
@@ -343,6 +423,19 @@ fn ease_out_quart(t: f32) -> f32 {
 fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     let value = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
+}
+
+fn distance_to_segment(px: f32, py: f32, from: (f32, f32), to: (f32, f32)) -> f32 {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let length_squared = dx * dx + dy * dy;
+    if length_squared == 0.0 {
+        return ((px - from.0).powi(2) + (py - from.1).powi(2)).sqrt();
+    }
+    let t = (((px - from.0) * dx + (py - from.1) * dy) / length_squared).clamp(0.0, 1.0);
+    let nearest_x = from.0 + dx * t;
+    let nearest_y = from.1 + dy * t;
+    ((px - nearest_x).powi(2) + (py - nearest_y).powi(2)).sqrt()
 }
 
 fn lift_color(color: [u8; 3], scale: f32, offset: u8) -> [u8; 3] {
@@ -403,7 +496,7 @@ mod tests {
             hold_ms: 0,
             decay_ms: 300,
             threshold: 2,
-            length: 0.4,
+            length: 0.82,
             color: [255, 0, 0],
         };
         let mut terminal = TerminalCore::new(4, 1);
@@ -434,5 +527,11 @@ mod tests {
         };
 
         assert_eq!(cursor_point(from, to, 0.5), (12.0, 8.0));
+    }
+
+    #[test]
+    fn distance_to_segment_clamps_to_segment_endpoints() {
+        assert_eq!(distance_to_segment(5.0, 3.0, (0.0, 0.0), (10.0, 0.0)), 3.0);
+        assert_eq!(distance_to_segment(13.0, 4.0, (0.0, 0.0), (10.0, 0.0)), 5.0);
     }
 }
