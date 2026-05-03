@@ -7,6 +7,8 @@ use crate::{
     window_backend::{CELL_HEIGHT, CELL_WIDTH},
 };
 
+type Point = (f32, f32);
+
 pub(crate) struct PluginFrame<'a> {
     pub(crate) frame: &'a mut [u8],
     pub(crate) width_px: usize,
@@ -26,83 +28,15 @@ impl PluginFrame<'_> {
         );
     }
 
-    pub(crate) fn blend_cursor_at(
-        &mut self,
-        x: f32,
-        y: f32,
-        scale: f32,
-        color: [u8; 3],
-        alpha: u8,
-    ) {
-        self.blend_ellipse(
-            x,
-            y,
-            CELL_WIDTH as f32 * 0.55 * scale,
-            CELL_HEIGHT as f32 * 0.58 * scale,
-            color,
-            alpha,
-        )
-    }
-
-    pub(crate) fn blend_cursor_glow(
-        &mut self,
-        x: f32,
-        y: f32,
-        scale: f32,
-        color: [u8; 3],
-        alpha: u8,
-    ) {
-        self.blend_ellipse(
-            x,
-            y,
-            CELL_WIDTH as f32 * scale,
-            CELL_HEIGHT as f32 * scale,
-            color,
-            alpha,
-        )
-    }
-
-    pub(crate) fn blend_cursor_edge(
-        &mut self,
-        x: f32,
-        y: f32,
-        scale: f32,
-        color: [u8; 3],
-        alpha: u8,
-    ) {
-        self.blend_ellipse_ring(
-            x,
-            y,
-            CELL_WIDTH as f32 * 0.68 * scale,
-            CELL_HEIGHT as f32 * 0.72 * scale,
-            color,
-            alpha,
-        )
-    }
-
-    pub(crate) fn blend_capsule(
-        &mut self,
-        from: (f32, f32),
-        to: (f32, f32),
-        radius: f32,
-        color: [u8; 3],
-        alpha: u8,
-    ) {
-        self.blend_capsule_with(from, to, radius, color, alpha, |distance| {
-            1.0 - smoothstep(0.58, 1.0, distance)
+    pub(crate) fn blend_quad(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
+        self.blend_quad_with(corners, color, alpha, |edge_distance| {
+            smoothstep(0.0, 1.25, edge_distance)
         });
     }
 
-    pub(crate) fn blend_capsule_ring(
-        &mut self,
-        from: (f32, f32),
-        to: (f32, f32),
-        radius: f32,
-        color: [u8; 3],
-        alpha: u8,
-    ) {
-        self.blend_capsule_with(from, to, radius, color, alpha, |distance| {
-            smoothstep(0.48, 0.72, distance) * (1.0 - smoothstep(0.84, 1.0, distance))
+    pub(crate) fn blend_quad_ring(&mut self, corners: [Point; 4], color: [u8; 3], alpha: u8) {
+        self.blend_quad_with(corners, color, alpha, |edge_distance| {
+            1.0 - smoothstep(1.0, 3.0, edge_distance)
         });
     }
 
@@ -145,104 +79,50 @@ impl PluginFrame<'_> {
         }
     }
 
-    fn blend_ellipse(
+    fn blend_quad_with(
         &mut self,
-        x: f32,
-        y: f32,
-        radius_x: f32,
-        radius_y: f32,
-        color: [u8; 3],
-        alpha: u8,
-    ) {
-        if self.width_px == 0 || radius_x <= 0.0 || radius_y <= 0.0 {
-            return;
-        }
-        let height_px = self.frame.len() / self.width_px / 4;
-        let x_start = (x - radius_x).floor().max(0.0) as usize;
-        let y_start = (y - radius_y).floor().max(0.0) as usize;
-        let x_end = (x + radius_x).ceil().min(self.width_px as f32) as usize;
-        let y_end = (y + radius_y).ceil().min(height_px as f32) as usize;
-
-        for py in y_start..y_end {
-            let dy = (py as f32 + 0.5 - y) / radius_y;
-            for px in x_start..x_end {
-                let dx = (px as f32 + 0.5 - x) / radius_x;
-                let distance = dx * dx + dy * dy;
-                if distance > 1.0 {
-                    continue;
-                }
-                let local_alpha = (alpha as f32 * (1.0 - distance).powf(1.7)) as u8;
-                if local_alpha == 0 {
-                    continue;
-                }
-                blend_pixel(self.frame, self.width_px, px, py, color, local_alpha);
-            }
-        }
-    }
-
-    fn blend_ellipse_ring(
-        &mut self,
-        x: f32,
-        y: f32,
-        radius_x: f32,
-        radius_y: f32,
-        color: [u8; 3],
-        alpha: u8,
-    ) {
-        if self.width_px == 0 || radius_x <= 0.0 || radius_y <= 0.0 {
-            return;
-        }
-        let height_px = self.frame.len() / self.width_px / 4;
-        let x_start = (x - radius_x).floor().max(0.0) as usize;
-        let y_start = (y - radius_y).floor().max(0.0) as usize;
-        let x_end = (x + radius_x).ceil().min(self.width_px as f32) as usize;
-        let y_end = (y + radius_y).ceil().min(height_px as f32) as usize;
-
-        for py in y_start..y_end {
-            let dy = (py as f32 + 0.5 - y) / radius_y;
-            for px in x_start..x_end {
-                let dx = (px as f32 + 0.5 - x) / radius_x;
-                let distance = (dx * dx + dy * dy).sqrt();
-                if distance > 1.0 {
-                    continue;
-                }
-                let inner = smoothstep(0.42, 0.74, distance);
-                let outer = 1.0 - smoothstep(0.86, 1.0, distance);
-                let local_alpha = (alpha as f32 * inner * outer) as u8;
-                if local_alpha == 0 {
-                    continue;
-                }
-                blend_pixel(self.frame, self.width_px, px, py, color, local_alpha);
-            }
-        }
-    }
-
-    fn blend_capsule_with(
-        &mut self,
-        from: (f32, f32),
-        to: (f32, f32),
-        radius: f32,
+        corners: [Point; 4],
         color: [u8; 3],
         alpha: u8,
         opacity: impl Fn(f32) -> f32,
     ) {
-        if self.width_px == 0 || radius <= 0.0 {
+        if self.width_px == 0 {
             return;
         }
         let height_px = self.frame.len() / self.width_px / 4;
-        let x_start = (from.0.min(to.0) - radius).floor().max(0.0) as usize;
-        let y_start = (from.1.min(to.1) - radius).floor().max(0.0) as usize;
-        let x_end = (from.0.max(to.0) + radius).ceil().min(self.width_px as f32) as usize;
-        let y_end = (from.1.max(to.1) + radius).ceil().min(height_px as f32) as usize;
+        let min_x = corners
+            .iter()
+            .map(|corner| corner.0)
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as usize;
+        let max_x = corners
+            .iter()
+            .map(|corner| corner.0)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(self.width_px as f32) as usize;
+        let min_y = corners
+            .iter()
+            .map(|corner| corner.1)
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as usize;
+        let max_y = corners
+            .iter()
+            .map(|corner| corner.1)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(height_px as f32) as usize;
 
-        for py in y_start..y_end {
-            for px in x_start..x_end {
-                let distance =
-                    distance_to_segment(px as f32 + 0.5, py as f32 + 0.5, from, to) / radius;
-                if distance > 1.0 {
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let point = (px as f32 + 0.5, py as f32 + 0.5);
+                if !point_in_quad(point, corners) {
                     continue;
                 }
-                let local_alpha = (alpha as f32 * opacity(distance).clamp(0.0, 1.0)) as u8;
+                let edge_distance = distance_to_quad_edge(point, corners);
+                let local_alpha = (alpha as f32 * opacity(edge_distance).clamp(0.0, 1.0)) as u8;
                 if local_alpha == 0 {
                     continue;
                 }
@@ -300,23 +180,65 @@ struct CursorTrail {
     last_cursor: Option<Cursor>,
     last_change: Instant,
     last_generation: Option<u64>,
-    trails: Vec<Trail>,
+    target: Option<CursorRect>,
+    corners: [Point; 4],
+    last_frame: Instant,
+    needs_render: bool,
 }
 
-struct Trail {
-    from: Cursor,
-    to: Cursor,
-    started: Instant,
+#[derive(Clone, Copy)]
+struct CursorRect {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+impl CursorRect {
+    fn from_cursor(cursor: Cursor) -> Self {
+        let left = f32::from(cursor.x) * CELL_WIDTH as f32;
+        let top = f32::from(cursor.y) * CELL_HEIGHT as f32;
+        Self {
+            left,
+            right: left + CELL_WIDTH as f32,
+            top,
+            bottom: top + CELL_HEIGHT as f32,
+        }
+    }
+
+    fn corners(self) -> [Point; 4] {
+        [
+            (self.right, self.top),
+            (self.right, self.bottom),
+            (self.left, self.bottom),
+            (self.left, self.top),
+        ]
+    }
+
+    fn center(self) -> Point {
+        (
+            (self.left + self.right) * 0.5,
+            (self.top + self.bottom) * 0.5,
+        )
+    }
+
+    fn half_diagonal(self) -> f32 {
+        ((self.right - self.left).powi(2) + (self.bottom - self.top).powi(2)).sqrt() * 0.5
+    }
 }
 
 impl CursorTrail {
     fn new(config: CursorTrailConfig) -> Self {
+        let now = Instant::now();
         Self {
             config,
             last_cursor: None,
-            last_change: Instant::now(),
+            last_change: now,
             last_generation: None,
-            trails: Vec::new(),
+            target: None,
+            corners: [(0.0, 0.0); 4],
+            last_frame: now,
+            needs_render: false,
         }
     }
 
@@ -327,13 +249,14 @@ impl CursorTrail {
             self.last_cursor = Some(cursor);
             self.last_generation = Some(generation);
             self.last_change = now;
+            self.snap_to_cursor(cursor, now);
             return;
         };
         if self.is_large_redraw(grid, last, cursor) {
             self.last_cursor = Some(cursor);
             self.last_generation = Some(generation);
             self.last_change = now;
-            self.trails.clear();
+            self.snap_to_cursor(cursor, now);
             return;
         }
         if last == cursor {
@@ -342,16 +265,14 @@ impl CursorTrail {
         }
 
         let stable = now.duration_since(self.last_change);
-        if last.visible
-            && cursor.visible
-            && stable >= Duration::from_millis(self.config.hold_ms)
-            && cursor_distance(last, cursor) >= self.config.threshold
-        {
-            self.trails.push(Trail {
-                from: last,
-                to: cursor,
-                started: now,
-            });
+        if last.visible && cursor.visible && stable >= Duration::from_millis(self.config.hold_ms) {
+            if cursor_distance(last, cursor) >= self.config.threshold || self.needs_render {
+                self.set_target(cursor, now);
+            } else {
+                self.snap_to_cursor(cursor, now);
+            }
+        } else if !cursor.visible || !self.needs_render {
+            self.snap_to_cursor(cursor, now);
         }
         self.last_cursor = Some(cursor);
         self.last_generation = Some(generation);
@@ -373,64 +294,122 @@ impl CursorTrail {
         grid.generation().saturating_sub(last_generation) > threshold
     }
 
-    fn draw_trails(&mut self, frame: &mut PluginFrame<'_>) {
-        self.trails.retain(|trail| {
-            frame.now.duration_since(trail.started) < trail_decay(self.config, trail)
-        });
+    fn snap_to_cursor(&mut self, cursor: Cursor, now: Instant) {
+        if cursor.visible {
+            let rect = CursorRect::from_cursor(cursor);
+            self.target = Some(rect);
+            self.corners = rect.corners();
+        } else {
+            self.target = None;
+        }
+        self.last_frame = now;
+        self.needs_render = false;
+    }
+
+    fn set_target(&mut self, cursor: Cursor, now: Instant) {
+        let target = CursorRect::from_cursor(cursor);
+        let was_idle = !self.needs_render;
+        if self.target.is_none() {
+            self.corners = target.corners();
+        }
+        self.target = Some(target);
+        if was_idle {
+            self.last_frame = now;
+        }
+        self.needs_render = true;
+    }
+
+    fn update_corners(&mut self, now: Instant) {
+        let Some(target) = self.target else {
+            self.last_frame = now;
+            self.needs_render = false;
+            return;
+        };
+        if !self.needs_render {
+            self.corners = target.corners();
+            self.last_frame = now;
+            return;
+        }
+
+        let dt = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
+        if dt <= 0.0 {
+            return;
+        }
+
+        let target_corners = target.corners();
+        let center = target.center();
+        let half_diagonal = target.half_diagonal().max(0.001);
+        let mut deltas = [(0.0, 0.0); 4];
+        let mut dots = [0.0; 4];
+        for i in 0..4 {
+            let dx = target_corners[i].0 - self.corners[i].0;
+            let dy = target_corners[i].1 - self.corners[i].1;
+            deltas[i] = if dx.abs() < 0.001 && dy.abs() < 0.001 {
+                (0.0, 0.0)
+            } else {
+                (dx, dy)
+            };
+            let length = point_length(deltas[i]);
+            if length > 0.0 {
+                dots[i] = (dx * (target_corners[i].0 - center.0)
+                    + dy * (target_corners[i].1 - center.1))
+                    / half_diagonal
+                    / length;
+            }
+        }
+
+        let (min_dot, max_dot) = dots
+            .iter()
+            .copied()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), dot| {
+                (min.min(dot), max.max(dot))
+            });
+        let slow_decay = (self.config.decay_ms.max(1) as f32) / 1000.0;
+        let fast_decay = (slow_decay * 0.38).max(0.001);
+
+        for i in 0..4 {
+            if deltas[i] == (0.0, 0.0) {
+                continue;
+            }
+            let decay = if (max_dot - min_dot).abs() < f32::EPSILON {
+                slow_decay
+            } else {
+                slow_decay + (fast_decay - slow_decay) * (dots[i] - min_dot) / (max_dot - min_dot)
+            };
+            let step = exponential_step(dt, decay);
+            self.corners[i].0 += deltas[i].0 * step;
+            self.corners[i].1 += deltas[i].1 * step;
+        }
+
+        self.needs_render = target_corners
+            .iter()
+            .zip(self.corners)
+            .any(|(target, corner)| {
+                (target.0 - corner.0).abs() >= 0.5 || (target.1 - corner.1).abs() >= 0.5
+            });
+    }
+
+    fn draw_trail(&self, frame: &mut PluginFrame<'_>) {
+        if self.target.is_none() || !self.needs_render {
+            return;
+        }
 
         let edge = lift_color(self.config.color, 1.25, 28);
         let hot = lift_color(self.config.color, 1.8, 64);
-        for trail in &self.trails {
-            let decay = trail_decay(self.config, trail);
-            let age = frame.now.duration_since(trail.started);
-            let raw = (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
-            let progress = exponential_ease_out(raw);
-            let fade = 1.0 - raw;
-            let start = (progress - self.config.length).max(0.0);
-            let tail = cursor_point(trail.from, trail.to, start);
-            let head = cursor_point(trail.from, trail.to, progress);
-            if progress > start {
-                let dark_alpha = (74.0 * fade) as u8;
-                let rim_alpha = (225.0 * fade) as u8;
-                let core_alpha = (235.0 * fade) as u8;
-                frame.blend_capsule(
-                    tail,
-                    head,
-                    CELL_HEIGHT as f32 * 0.24,
-                    [4, 8, 12],
-                    dark_alpha,
-                );
-                frame.blend_capsule_ring(tail, head, CELL_HEIGHT as f32 * 0.22, edge, rim_alpha);
-                frame.blend_capsule(
-                    tail,
-                    head,
-                    CELL_HEIGHT as f32 * 0.12,
-                    self.config.color,
-                    core_alpha,
-                );
-                frame.blend_capsule(
-                    tail,
-                    head,
-                    CELL_HEIGHT as f32 * 0.04,
-                    hot,
-                    (150.0 * fade) as u8,
-                );
-            }
-            let (x, y) = cursor_point(trail.from, trail.to, progress);
-            frame.blend_cursor_glow(x, y, 0.92, self.config.color, (24.0 * fade) as u8);
-            frame.blend_cursor_edge(x, y, 0.98, [4, 8, 12], (72.0 * fade) as u8);
-            frame.blend_cursor_edge(x, y, 0.84, edge, (180.0 * fade) as u8);
-            frame.blend_cursor_at(x, y, 0.78, self.config.color, (250.0 * fade) as u8);
-            frame.blend_cursor_at(x, y, 0.30, hot, (220.0 * fade) as u8);
-        }
+        frame.blend_quad(self.corners, [4, 8, 12], 82);
+        frame.blend_quad_ring(self.corners, edge, 235);
+        frame.blend_quad(self.corners, self.config.color, 205);
+        frame.blend_quad_ring(self.corners, hot, 132);
     }
 }
 
 impl Plugin for CursorTrail {
     fn draw(&mut self, frame: &mut PluginFrame<'_>) -> bool {
         self.observe_cursor(frame.grid, frame.now);
-        self.draw_trails(frame);
-        !self.trails.is_empty()
+        self.update_corners(frame.now);
+        self.draw_trail(frame);
+        self.needs_render
     }
 }
 
@@ -438,33 +417,41 @@ fn cursor_distance(a: Cursor, b: Cursor) -> u16 {
     a.x.abs_diff(b.x).max(a.y.abs_diff(b.y))
 }
 
-fn cursor_point(from: Cursor, to: Cursor, t: f32) -> (f32, f32) {
-    let from_x = (f32::from(from.x) + 0.5) * CELL_WIDTH as f32;
-    let from_y = (f32::from(from.y) + 0.5) * CELL_HEIGHT as f32;
-    let to_x = (f32::from(to.x) + 0.5) * CELL_WIDTH as f32;
-    let to_y = (f32::from(to.y) + 0.5) * CELL_HEIGHT as f32;
-    (from_x + (to_x - from_x) * t, from_y + (to_y - from_y) * t)
-}
-
-fn exponential_ease_out(t: f32) -> f32 {
-    if t >= 1.0 {
-        1.0
-    } else {
-        1.0 - 2.0_f32.powf(-10.0 * t)
-    }
-}
-
-fn trail_decay(config: CursorTrailConfig, trail: &Trail) -> Duration {
-    let max_ms = config.decay_ms.max(1) as f32;
-    let min_ms = (max_ms * 0.38).max(1.0);
-    let distance = f32::from(cursor_distance(trail.from, trail.to));
-    let distance_factor = (distance / 40.0).clamp(0.0, 1.0);
-    Duration::from_millis((min_ms + (max_ms - min_ms) * distance_factor) as u64)
+fn exponential_step(dt: f32, decay: f32) -> f32 {
+    1.0 - 2.0_f32.powf(-10.0 * dt / decay.max(0.001))
 }
 
 fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     let value = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
+}
+
+fn point_length(point: Point) -> f32 {
+    (point.0 * point.0 + point.1 * point.1).sqrt()
+}
+
+fn point_in_quad(point: Point, corners: [Point; 4]) -> bool {
+    let mut sign = 0.0_f32;
+    for i in 0..4 {
+        let a = corners[i];
+        let b = corners[(i + 1) % 4];
+        let cross = (b.0 - a.0) * (point.1 - a.1) - (b.1 - a.1) * (point.0 - a.0);
+        if cross.abs() < 0.001 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if sign * cross < 0.0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn distance_to_quad_edge(point: Point, corners: [Point; 4]) -> f32 {
+    (0..4)
+        .map(|i| distance_to_segment(point.0, point.1, corners[i], corners[(i + 1) % 4]))
+        .fold(f32::INFINITY, f32::min)
 }
 
 fn distance_to_segment(px: f32, py: f32, from: (f32, f32), to: (f32, f32)) -> f32 {
@@ -620,34 +607,31 @@ mod tests {
     }
 
     #[test]
-    fn cursor_point_interpolates_in_pixel_space() {
-        let from = Cursor {
-            x: 0,
-            y: 0,
-            visible: true,
-        };
-        let to = Cursor {
+    fn cursor_rect_uses_cell_bounds() {
+        let rect = CursorRect::from_cursor(Cursor {
             x: 2,
-            y: 0,
+            y: 1,
             visible: true,
-        };
+        });
 
-        assert_eq!(cursor_point(from, to, 0.5), (12.0, 8.0));
+        assert_eq!(
+            rect.corners(),
+            [(24.0, 16.0), (24.0, 32.0), (16.0, 32.0), (16.0, 16.0)]
+        );
     }
 
     #[test]
-    fn cursor_trail_easing_moves_fast_then_settles() {
-        assert_eq!(exponential_ease_out(0.0), 0.0);
-        assert_eq!(exponential_ease_out(1.0), 1.0);
+    fn cursor_trail_step_moves_fast_then_settles() {
+        assert_eq!(exponential_step(0.0, 0.3), 0.0);
 
-        let first_step = exponential_ease_out(0.1) - exponential_ease_out(0.0);
-        let second_step = exponential_ease_out(0.2) - exponential_ease_out(0.1);
+        let first_step = exponential_step(0.01, 0.3);
+        let second_step = exponential_step(0.01, 0.3) * (1.0 - first_step);
         assert!(first_step > second_step);
-        assert!(exponential_ease_out(0.5) > 0.95);
+        assert!(exponential_step(0.3, 0.3) > 0.99);
     }
 
     #[test]
-    fn cursor_trail_decay_scales_with_jump_distance() {
+    fn cursor_trail_corners_chase_target() {
         let config = CursorTrailConfig {
             hold_ms: 0,
             decay_ms: 300,
@@ -655,52 +639,49 @@ mod tests {
             length: 1.0,
             color: [255, 0, 0],
         };
-        let near = Trail {
-            from: Cursor {
+        let mut plugin = CursorTrail::new(config);
+        let start = Instant::now();
+        plugin.snap_to_cursor(
+            Cursor {
                 x: 0,
                 y: 0,
                 visible: true,
             },
-            to: Cursor {
-                x: 2,
+            start,
+        );
+        plugin.set_target(
+            Cursor {
+                x: 3,
                 y: 0,
                 visible: true,
             },
-            started: Instant::now(),
-        };
-        let far = Trail {
-            to: Cursor { x: 40, ..near.to },
-            ..near
-        };
+            start,
+        );
+        let before = plugin.corners[0].0;
 
-        assert!(trail_decay(config, &near) < trail_decay(config, &far));
-        assert_eq!(trail_decay(config, &far), Duration::from_millis(300));
+        plugin.update_corners(start + Duration::from_millis(16));
+
+        assert!(plugin.corners[0].0 > before);
+        assert!(
+            plugin.corners[0].0
+                < CursorRect::from_cursor(Cursor {
+                    x: 3,
+                    y: 0,
+                    visible: true,
+                })
+                .corners()[0]
+                    .0
+        );
+        assert!(plugin.needs_render);
     }
 
     #[test]
-    fn cursor_trail_decay_respects_low_configured_values() {
-        let config = CursorTrailConfig {
-            hold_ms: 0,
-            decay_ms: 20,
-            threshold: 1,
-            length: 1.0,
-            color: [255, 0, 0],
-        };
-        let trail = Trail {
-            from: Cursor {
-                x: 0,
-                y: 0,
-                visible: true,
-            },
-            to: Cursor {
-                x: 40,
-                y: 0,
-                visible: true,
-            },
-            started: Instant::now(),
-        };
+    fn quad_geometry_checks_inside_points_and_edges() {
+        let corners = [(8.0, 0.0), (8.0, 16.0), (0.0, 16.0), (0.0, 0.0)];
 
-        assert_eq!(trail_decay(config, &trail), Duration::from_millis(20));
+        assert!(point_in_quad((4.0, 8.0), corners));
+        assert!(!point_in_quad((10.0, 8.0), corners));
+        assert_eq!(distance_to_quad_edge((4.0, 8.0), corners), 4.0);
     }
 
     #[test]
