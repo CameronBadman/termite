@@ -17,10 +17,48 @@ pub(crate) struct PluginFrame<'a> {
 impl PluginFrame<'_> {
     pub(crate) fn blend_cell(&mut self, x: u16, y: u16, color: [u8; 3], alpha: u8) {
         self.blend_rect(
-            usize::from(x) * CELL_WIDTH as usize,
-            usize::from(y) * CELL_HEIGHT as usize,
-            CELL_WIDTH as usize,
-            CELL_HEIGHT as usize,
+            usize::from(x) * cell_width(),
+            usize::from(y) * cell_height(),
+            cell_width(),
+            cell_height(),
+            color,
+            alpha,
+        );
+    }
+
+    pub(crate) fn blend_cursor_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        let width = (CELL_WIDTH as f32 * scale).round().max(2.0) as usize;
+        let height = (CELL_HEIGHT as f32 * scale).round().max(4.0) as usize;
+        self.blend_rect(
+            (x - width as f32 * 0.5).round().max(0.0) as usize,
+            (y - height as f32 * 0.5).round().max(0.0) as usize,
+            width,
+            height,
+            color,
+            alpha,
+        );
+    }
+
+    pub(crate) fn blend_cursor_glow(
+        &mut self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [u8; 3],
+        alpha: u8,
+    ) {
+        self.blend_rect(
+            (x - CELL_WIDTH as f32 * scale * 0.7).round().max(0.0) as usize,
+            (y - CELL_HEIGHT as f32 * scale * 0.7).round().max(0.0) as usize,
+            (CELL_WIDTH as f32 * scale * 1.4).round().max(3.0) as usize,
+            (CELL_HEIGHT as f32 * scale * 1.4).round().max(5.0) as usize,
             color,
             alpha,
         );
@@ -29,9 +67,9 @@ impl PluginFrame<'_> {
     pub(crate) fn blend_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
         self.blend_rect(
             0,
-            usize::from(y) * CELL_HEIGHT as usize,
-            usize::from(self.grid.width()) * CELL_WIDTH as usize,
-            CELL_HEIGHT as usize,
+            usize::from(y) * cell_height(),
+            usize::from(self.grid.width()) * cell_width(),
+            cell_height(),
             color,
             alpha,
         );
@@ -165,10 +203,19 @@ impl CursorTrail {
 
         for trail in &self.trails {
             let age = frame.now.duration_since(trail.started);
-            let life = 1.0 - (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
-            for (step, (x, y)) in trail_cells(trail.from, trail.to).enumerate() {
-                let alpha = (150.0 * life * (1.0 - step as f32 * 0.08).max(0.2)) as u8;
-                frame.blend_cell(x, y, self.config.color, alpha);
+            let progress =
+                ease_out_cubic((age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0));
+            let fade = 1.0 - (age.as_secs_f32() / decay.as_secs_f32()).clamp(0.0, 1.0);
+            let start = (progress - self.config.length).max(0.0);
+            for sample in 0..18 {
+                let sample_progress = sample as f32 / 17.0;
+                let t = start + (progress - start) * sample_progress;
+                let (x, y) = cursor_point(trail.from, trail.to, t);
+                let tail = sample_progress.powf(1.8);
+                let alpha = (180.0 * fade * tail).clamp(0.0, 180.0) as u8;
+                let scale = 0.65 + tail * 0.35;
+                frame.blend_cursor_glow(x, y, scale * 1.25, self.config.color, alpha / 4);
+                frame.blend_cursor_at(x, y, scale, self.config.color, alpha);
             }
         }
     }
@@ -186,15 +233,24 @@ fn cursor_distance(a: Cursor, b: Cursor) -> u16 {
     a.x.abs_diff(b.x).max(a.y.abs_diff(b.y))
 }
 
-fn trail_cells(from: Cursor, to: Cursor) -> impl Iterator<Item = (u16, u16)> {
-    let dx = i32::from(to.x) - i32::from(from.x);
-    let dy = i32::from(to.y) - i32::from(from.y);
-    let steps = dx.abs().max(dy.abs()).max(1);
-    (0..steps).map(move |index| {
-        let x = i32::from(from.x) + dx * index / steps;
-        let y = i32::from(from.y) + dy * index / steps;
-        (x as u16, y as u16)
-    })
+fn cursor_point(from: Cursor, to: Cursor, t: f32) -> (f32, f32) {
+    let from_x = (f32::from(from.x) + 0.5) * CELL_WIDTH as f32;
+    let from_y = (f32::from(from.y) + 0.5) * CELL_HEIGHT as f32;
+    let to_x = (f32::from(to.x) + 0.5) * CELL_WIDTH as f32;
+    let to_y = (f32::from(to.y) + 0.5) * CELL_HEIGHT as f32;
+    (from_x + (to_x - from_x) * t, from_y + (to_y - from_y) * t)
+}
+
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn cell_width() -> usize {
+    CELL_WIDTH as usize
+}
+
+fn cell_height() -> usize {
+    CELL_HEIGHT as usize
 }
 
 #[cfg(test)]
@@ -234,6 +290,7 @@ mod tests {
             hold_ms: 0,
             decay_ms: 300,
             threshold: 2,
+            length: 0.4,
             color: [255, 0, 0],
         };
         let mut terminal = TerminalCore::new(4, 1);
@@ -248,5 +305,21 @@ mod tests {
             &mut bytes,
             start + Duration::from_millis(1),
         )));
+    }
+
+    #[test]
+    fn cursor_point_interpolates_in_pixel_space() {
+        let from = Cursor {
+            x: 0,
+            y: 0,
+            visible: true,
+        };
+        let to = Cursor {
+            x: 2,
+            y: 0,
+            visible: true,
+        };
+
+        assert_eq!(cursor_point(from, to, 0.5), (12.0, 8.0));
     }
 }
