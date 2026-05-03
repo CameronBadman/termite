@@ -4,9 +4,9 @@ use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
 use c_term_core::{Cell, Style};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 
-use crate::runner::FontConfig;
+use crate::{runner::FontConfig, theme::Theme};
 
-use super::{CELL_HEIGHT, CELL_WIDTH, rgb};
+use super::{CELL_HEIGHT, CELL_WIDTH};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct GlyphKey {
@@ -32,13 +32,15 @@ struct GlyphBitmap {
 pub(super) struct TextRenderer {
     fonts: Vec<LoadedFont>,
     glyphs: HashMap<GlyphKey, GlyphBitmap>,
+    theme: Theme,
 }
 
 impl TextRenderer {
-    pub(super) fn new(font: FontConfig) -> Self {
+    pub(super) fn new(font: FontConfig, theme: Theme) -> Self {
         Self {
             fonts: load_fonts(font),
             glyphs: HashMap::new(),
+            theme,
         }
     }
 
@@ -66,8 +68,8 @@ impl TextRenderer {
         ch: char,
         style: Style,
     ) {
-        let fg = rgb(style.foreground, [220, 224, 232]);
-        let bg = rgb(style.background, [16, 18, 24]);
+        let fg = self.theme.color(style.foreground);
+        let bg = self.theme.color(style.background);
         if draw_box_cell(frame, width, cell_x, cell_y, ch, fg, bg) {
             return;
         }

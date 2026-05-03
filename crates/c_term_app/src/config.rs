@@ -1,14 +1,18 @@
 use crate::{
     plugins::{CursorLine, CursorLineConfig, CursorTrail, CursorTrailColor, CursorTrailConfig},
     plugins::{ScreenOpacity, ScreenOpacityConfig},
-    runner::{Runner, RunnerPart, bitmap_font, font_file, parts},
+    runner::{Runner, RunnerPart, bitmap_font, font_file, parts, theme},
+    theme::Theme,
 };
 
 const USE_TTF_FONT: bool = false;
 const TTF_FONT_PATH: &str = "/usr/share/fonts/liberation-fonts/LiberationMono-Regular.ttf";
 
 pub(crate) fn runner() -> Runner {
-    Runner::new().with(terminal_font()).with(terminal_plugins())
+    Runner::new()
+        .with(terminal_font())
+        .with(terminal_theme())
+        .with(terminal_plugins())
 }
 
 fn terminal_font() -> impl RunnerPart {
@@ -17,6 +21,31 @@ fn terminal_font() -> impl RunnerPart {
     } else {
         bitmap_font()
     }
+}
+
+fn terminal_theme() -> impl RunnerPart {
+    theme(Theme {
+        foreground: [224, 228, 232],
+        background: [10, 12, 16],
+        ansi: [
+            [12, 12, 12],
+            [230, 75, 95],
+            [82, 196, 120],
+            [229, 181, 103],
+            [91, 156, 235],
+            [190, 118, 235],
+            [74, 207, 207],
+            [210, 214, 220],
+            [118, 124, 136],
+            [255, 105, 125],
+            [115, 225, 145],
+            [245, 209, 125],
+            [125, 180, 255],
+            [215, 145, 255],
+            [105, 235, 235],
+            [245, 247, 250],
+        ],
+    })
 }
 
 fn terminal_plugins() -> impl RunnerPart {
@@ -101,5 +130,13 @@ mod tests {
                 size: 14.0,
             }
         );
+    }
+
+    #[test]
+    fn runner_config_can_select_theme() {
+        let runner = Runner::new().with(terminal_theme());
+
+        assert_eq!(runner.theme().background, [10, 12, 16]);
+        assert_eq!(runner.theme().ansi[1], [230, 75, 95]);
     }
 }

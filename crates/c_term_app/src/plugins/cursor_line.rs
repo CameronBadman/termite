@@ -63,9 +63,11 @@ mod tests {
     fn cursor_line_emits_row_and_cell_overlays() {
         let terminal = TerminalCore::new(4, 1);
         let mut plugin = CursorLine::default();
+        let theme = crate::theme::Theme::default();
         let mut frame = PluginFrame {
             grid: terminal.grid(),
             now: Instant::now(),
+            theme: &theme,
             overlays: Vec::new(),
             screen_opacity: 1.0,
         };

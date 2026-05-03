@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use c_term_core::{Color, CursorShape, DamageBatch, Grid, MouseState, MouseTracking, TerminalCore};
+use c_term_core::{CursorShape, DamageBatch, Grid, MouseState, MouseTracking, TerminalCore};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
@@ -20,6 +20,7 @@ use crate::{PtyChild, set_pty_winsize, spawn_shell};
 use crate::{
     plugins::{PluginFrame, PluginHost},
     runner::{FontConfig, Runner},
+    theme::Theme,
 };
 
 mod gpu;
@@ -50,8 +51,8 @@ pub(crate) fn run(runner: Runner) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let (shell, plugins, font) = runner.into_parts();
-    let mut state = WindowBackend::new(shell, event_loop.create_proxy(), plugins, font);
+    let (shell, plugins, font, theme) = runner.into_parts();
+    let mut state = WindowBackend::new(shell, event_loop.create_proxy(), plugins, font, theme);
     event_loop.run_app(&mut state)?;
     Ok(())
 }
@@ -67,6 +68,7 @@ struct WindowBackend {
     modifiers: ModifiersState,
     cols: u16,
     rows: u16,
+    theme: Theme,
     render_cache: RenderCache,
     mouse_buttons: u8,
     mouse_position: Option<(u16, u16)>,
@@ -86,6 +88,7 @@ impl WindowBackend {
         proxy: EventLoopProxy<UserEvent>,
         plugins: PluginHost,
         font: FontConfig,
+        theme: Theme,
     ) -> Self {
         Self {
             shell,
@@ -98,7 +101,8 @@ impl WindowBackend {
             modifiers: ModifiersState::empty(),
             cols: 1,
             rows: 1,
-            render_cache: RenderCache::new(font),
+            theme,
+            render_cache: RenderCache::new(font, theme),
             mouse_buttons: 0,
             mouse_position: None,
             animation_deadline: None,
@@ -460,6 +464,7 @@ impl WindowBackend {
             let mut plugin_frame = PluginFrame {
                 grid: terminal.grid(),
                 now: render_started,
+                theme: &self.theme,
                 overlays: Vec::new(),
                 screen_opacity: 1.0,
             };
@@ -626,36 +631,6 @@ fn cursor_uniform(grid: &Grid) -> [f32; 4] {
     ]
 }
 
-pub(crate) fn rgb(color: Color, fallback: [u8; 3]) -> [u8; 3] {
-    match color {
-        Color::DefaultForeground | Color::DefaultBackground => fallback,
-        Color::Indexed(index) => ANSI_COLORS
-            .get(usize::from(index))
-            .copied()
-            .unwrap_or(fallback),
-        Color::Rgb(r, g, b) => [r, g, b],
-    }
-}
-
-const ANSI_COLORS: [[u8; 3]; 16] = [
-    [12, 12, 12],
-    [197, 15, 31],
-    [19, 161, 14],
-    [193, 156, 0],
-    [0, 55, 218],
-    [136, 23, 152],
-    [58, 150, 221],
-    [204, 204, 204],
-    [118, 118, 118],
-    [231, 72, 86],
-    [22, 198, 12],
-    [249, 241, 165],
-    [59, 120, 255],
-    [180, 0, 158],
-    [97, 214, 214],
-    [242, 242, 242],
-];
-
 #[cfg(test)]
 mod tests {
     use super::text::{box_segments, draw_box_cell};
@@ -697,7 +672,7 @@ mod tests {
     fn base_frame_cache_updates_only_dirty_rows() {
         let mut terminal = TerminalCore::new(4, 2);
         let _ = terminal.process_pty_input(b"A\x1b[2;1HB");
-        let mut cache = RenderCache::new(FontConfig::Bitmap8x8);
+        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default());
 
         let frame = cache.update(terminal.grid());
         let first_row = frame[..CELL_HEIGHT as usize * 4 * CELL_WIDTH as usize * 4].to_vec();
@@ -717,7 +692,7 @@ mod tests {
         let mut terminal = TerminalCore::new(3, 2);
         let _ = terminal.process_pty_input(b"ab\r\ncd\r\nef");
         let _ = terminal.resize(5, 2);
-        let mut cache = RenderCache::new(FontConfig::Bitmap8x8);
+        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default());
 
         let frame = cache.update_scrollback(&terminal, 1);
 
@@ -728,7 +703,7 @@ mod tests {
     fn scrollback_cache_keeps_incremental_scrolls_clean() {
         let mut terminal = TerminalCore::new(3, 2);
         let _ = terminal.process_pty_input(b"aa\r\nbb\r\ncc\r\ndd");
-        let mut cache = RenderCache::new(FontConfig::Bitmap8x8);
+        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default());
 
         let _ = cache.update_scrollback(&terminal, 1);
         let _ = cache.update_scrollback(&terminal, 2);

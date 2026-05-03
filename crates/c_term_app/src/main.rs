@@ -3,6 +3,7 @@ use std::{env, ffi::CString, fs::File, io, os::fd::RawFd};
 mod config;
 mod plugins;
 mod runner;
+mod theme;
 mod window_backend;
 
 use nix::{

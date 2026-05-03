@@ -46,9 +46,11 @@ mod tests {
     fn screen_opacity_sets_frame_opacity() {
         let terminal = TerminalCore::new(4, 2);
         let mut plugin = ScreenOpacity::new(ScreenOpacityConfig { opacity: 0.7 });
+        let theme = crate::theme::Theme::default();
         let mut frame = PluginFrame {
             grid: terminal.grid(),
             now: Instant::now(),
+            theme: &theme,
             overlays: Vec::new(),
             screen_opacity: 1.0,
         };

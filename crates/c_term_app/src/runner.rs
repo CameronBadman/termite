@@ -1,6 +1,6 @@
 use std::{env, error::Error};
 
-use crate::{plugins::PluginHost, window_backend};
+use crate::{plugins::PluginHost, theme::Theme, window_backend};
 
 type InstallPart = Box<dyn FnOnce(&mut Runner)>;
 
@@ -18,6 +18,7 @@ pub(crate) struct Runner {
     shell: String,
     plugins: PluginHost,
     font: FontConfig,
+    theme: Theme,
 }
 
 impl Runner {
@@ -26,6 +27,7 @@ impl Runner {
             shell: env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned()),
             plugins: PluginHost::new(),
             font: FontConfig::default(),
+            theme: Theme::default(),
         }
     }
 
@@ -38,8 +40,8 @@ impl Runner {
         window_backend::run(self)
     }
 
-    pub(crate) fn into_parts(self) -> (String, PluginHost, FontConfig) {
-        (self.shell, self.plugins, self.font)
+    pub(crate) fn into_parts(self) -> (String, PluginHost, FontConfig, Theme) {
+        (self.shell, self.plugins, self.font, self.theme)
     }
 
     fn add_plugin(&mut self, plugin: impl crate::plugins::Plugin + 'static) {
@@ -50,6 +52,10 @@ impl Runner {
         self.font = font;
     }
 
+    fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     #[cfg(test)]
     pub(crate) fn plugin_count(&self) -> usize {
         self.plugins.len()
@@ -58,6 +64,11 @@ impl Runner {
     #[cfg(test)]
     pub(crate) fn font(&self) -> &FontConfig {
         &self.font
+    }
+
+    #[cfg(test)]
+    pub(crate) fn theme(&self) -> Theme {
+        self.theme
     }
 }
 
@@ -94,6 +105,18 @@ pub(crate) struct FontPart(FontConfig);
 impl RunnerPart for FontPart {
     fn install(self, runner: &mut Runner) {
         runner.set_font(self.0);
+    }
+}
+
+pub(crate) fn theme(theme: Theme) -> ThemePart {
+    ThemePart(theme)
+}
+
+pub(crate) struct ThemePart(Theme);
+
+impl RunnerPart for ThemePart {
+    fn install(self, runner: &mut Runner) {
+        runner.set_theme(self.0);
     }
 }
 

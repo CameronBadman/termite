@@ -2,7 +2,10 @@ use std::time::Instant;
 
 use c_term_core::Grid;
 
-use crate::window_backend::{CELL_HEIGHT, CELL_WIDTH};
+use crate::{
+    theme::Theme,
+    window_backend::{CELL_HEIGHT, CELL_WIDTH},
+};
 
 type Point = (f32, f32);
 
@@ -31,6 +34,7 @@ pub(crate) struct OverlayCommand {
 pub(crate) struct PluginFrame<'a> {
     pub(crate) grid: &'a Grid,
     pub(crate) now: Instant,
+    pub(crate) theme: &'a Theme,
     pub(crate) overlays: Vec<OverlayCommand>,
     pub(crate) screen_opacity: f32,
 }
@@ -148,10 +152,15 @@ mod tests {
     use super::*;
     use c_term_core::TerminalCore;
 
-    fn frame_for(terminal: &TerminalCore, now: Instant) -> PluginFrame<'_> {
+    fn frame_for<'a>(
+        terminal: &'a TerminalCore,
+        theme: &'a Theme,
+        now: Instant,
+    ) -> PluginFrame<'a> {
         PluginFrame {
             grid: terminal.grid(),
             now,
+            theme,
             overlays: Vec::new(),
             screen_opacity: 1.0,
         }
@@ -164,7 +173,8 @@ mod tests {
         host.add(ScreenOpacity::default());
         host.add(CursorLine::default());
         host.add(CursorTrail::new(CursorTrailConfig::default()));
-        let mut frame = frame_for(&terminal, Instant::now());
+        let theme = Theme::default();
+        let mut frame = frame_for(&terminal, &theme, Instant::now());
 
         host.draw(&mut frame);
 

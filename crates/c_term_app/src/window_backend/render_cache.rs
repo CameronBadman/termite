@@ -1,6 +1,6 @@
 use c_term_core::{Cell, DamageBatch, DamageRegion, Grid, TerminalCore};
 
-use crate::runner::FontConfig;
+use crate::{runner::FontConfig, theme::Theme};
 
 use super::{CELL_HEIGHT, CELL_WIDTH, text::TextRenderer};
 
@@ -47,7 +47,7 @@ impl TextureUpdate {
 }
 
 impl RenderCache {
-    pub(super) fn new(font: FontConfig) -> Self {
+    pub(super) fn new(font: FontConfig, theme: Theme) -> Self {
         Self {
             frame: Vec::new(),
             dirty_rows: Vec::new(),
@@ -57,7 +57,7 @@ impl RenderCache {
             upload_scrolls: Vec::new(),
             dirty: true,
             scroll_start: None,
-            text: TextRenderer::new(font),
+            text: TextRenderer::new(font, theme),
         }
     }
 

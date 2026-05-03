@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use c_term_core::{Color, Cursor, CursorShape, Grid};
 
-use crate::window_backend::{CELL_HEIGHT, CELL_WIDTH, rgb};
+use crate::theme::Theme;
+use crate::window_backend::{CELL_HEIGHT, CELL_WIDTH};
 
 use super::{Plugin, PluginFrame, Point};
 
@@ -120,7 +121,7 @@ impl CursorTrail {
         }
     }
 
-    fn observe_cursor(&mut self, grid: &Grid, now: Instant) {
+    fn observe_cursor(&mut self, grid: &Grid, theme: Theme, now: Instant) {
         let cursor = grid.cursor();
         let generation = grid.generation();
         if grid.is_synchronized() {
@@ -128,7 +129,7 @@ impl CursorTrail {
             self.last_generation = Some(generation);
             self.last_change = now;
             if !self.needs_render {
-                self.snap_to_cursor(grid, cursor, now);
+                self.snap_to_cursor(grid, theme, cursor, now);
             }
             return;
         }
@@ -136,14 +137,14 @@ impl CursorTrail {
             self.last_cursor = Some(cursor);
             self.last_generation = Some(generation);
             self.last_change = now;
-            self.snap_to_cursor(grid, cursor, now);
+            self.snap_to_cursor(grid, theme, cursor, now);
             return;
         };
         if self.is_large_redraw(grid, last, cursor) {
             self.last_cursor = Some(cursor);
             self.last_generation = Some(generation);
             self.last_change = now;
-            self.snap_to_cursor(grid, cursor, now);
+            self.snap_to_cursor(grid, theme, cursor, now);
             return;
         }
         if last == cursor {
@@ -155,19 +156,19 @@ impl CursorTrail {
             self.last_cursor = Some(cursor);
             self.last_generation = Some(generation);
             self.last_change = now;
-            self.snap_to_cursor(grid, cursor, now);
+            self.snap_to_cursor(grid, theme, cursor, now);
             return;
         }
 
         let stable = now.duration_since(self.last_change);
         if last.visible && cursor.visible && stable >= Duration::from_millis(self.config.hold_ms) {
             if cursor_distance(last, cursor) >= self.config.threshold || self.needs_render {
-                self.set_target(grid, cursor, now);
+                self.set_target(grid, theme, cursor, now);
             } else {
-                self.snap_to_cursor(grid, cursor, now);
+                self.snap_to_cursor(grid, theme, cursor, now);
             }
         } else if !cursor.visible || !self.needs_render {
-            self.snap_to_cursor(grid, cursor, now);
+            self.snap_to_cursor(grid, theme, cursor, now);
         }
         self.last_cursor = Some(cursor);
         self.last_generation = Some(generation);
@@ -189,12 +190,12 @@ impl CursorTrail {
         grid.generation().saturating_sub(last_generation) > threshold
     }
 
-    fn snap_to_cursor(&mut self, grid: &Grid, cursor: Cursor, now: Instant) {
+    fn snap_to_cursor(&mut self, grid: &Grid, theme: Theme, cursor: Cursor, now: Instant) {
         if cursor.visible {
             let rect = CursorRect::from_cursor(cursor);
             self.target = Some(rect);
             self.corners = rect.corners();
-            self.color = trail_color(self.config, grid, cursor);
+            self.color = trail_color(self.config, theme, grid, cursor);
         } else {
             self.target = None;
         }
@@ -202,14 +203,14 @@ impl CursorTrail {
         self.needs_render = false;
     }
 
-    fn set_target(&mut self, grid: &Grid, cursor: Cursor, now: Instant) {
+    fn set_target(&mut self, grid: &Grid, theme: Theme, cursor: Cursor, now: Instant) {
         let target = CursorRect::from_cursor(cursor);
         let was_idle = !self.needs_render;
         if self.target.is_none() {
             self.corners = target.corners();
         }
         self.target = Some(target);
-        self.color = trail_color(self.config, grid, cursor);
+        self.color = trail_color(self.config, theme, grid, cursor);
         if was_idle {
             self.last_frame = now;
         }
@@ -303,7 +304,7 @@ impl CursorTrail {
 
 impl Plugin for CursorTrail {
     fn draw(&mut self, frame: &mut PluginFrame<'_>) -> bool {
-        self.observe_cursor(frame.grid, frame.now);
+        self.observe_cursor(frame.grid, *frame.theme, frame.now);
         self.update_corners(frame.now);
         self.draw_trail(frame);
         self.needs_render
@@ -325,14 +326,14 @@ fn is_wrap_hop(grid: &Grid, from: Cursor, to: Cursor) -> bool {
     wrapped_down || wrapped_up
 }
 
-fn trail_color(config: CursorTrailConfig, grid: &Grid, cursor: Cursor) -> [u8; 3] {
+fn trail_color(config: CursorTrailConfig, theme: Theme, grid: &Grid, cursor: Cursor) -> [u8; 3] {
     if let CursorTrailColor::Rgb(color) = config.color {
         return color;
     }
     grid.cell(cursor.x, cursor.y)
         .map(|cell| {
-            let foreground = rgb(cell.style.foreground, [220, 224, 232]);
-            let background = rgb(cell.style.background, [16, 18, 24]);
+            let foreground = theme.color(cell.style.foreground);
+            let background = theme.color(cell.style.background);
             if matches!(cell.style.foreground, Color::DefaultForeground) {
                 lift_color(background, 1.6, 32)
             } else {
@@ -399,10 +400,15 @@ mod tests {
     use super::*;
     use c_term_core::TerminalCore;
 
-    fn frame_for(terminal: &TerminalCore, now: Instant) -> PluginFrame<'_> {
+    fn frame_for<'a>(
+        terminal: &'a TerminalCore,
+        theme: &'a Theme,
+        now: Instant,
+    ) -> PluginFrame<'a> {
         PluginFrame {
             grid: terminal.grid(),
             now,
+            theme,
             overlays: Vec::new(),
             screen_opacity: 1.0,
         }
@@ -426,11 +432,16 @@ mod tests {
         };
         let mut terminal = TerminalCore::new(4, 1);
         let mut plugin = CursorTrail::new(config);
+        let theme = Theme::default();
         let start = Instant::now();
 
-        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
+        assert!(!plugin.draw(&mut frame_for(&terminal, &theme, start)));
         let _ = terminal.process_pty_input(b"\x1b[4G");
-        assert!(plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(1),)));
+        assert!(plugin.draw(&mut frame_for(
+            &terminal,
+            &theme,
+            start + Duration::from_millis(1),
+        )));
     }
 
     #[test]
@@ -438,15 +449,20 @@ mod tests {
         let config = trail_config();
         let mut terminal = TerminalCore::new(20, 5);
         let mut plugin = CursorTrail::new(config);
+        let theme = Theme::default();
         let start = Instant::now();
 
-        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
+        assert!(!plugin.draw(&mut frame_for(&terminal, &theme, start)));
 
         let _ = terminal.process_pty_input(
             b"aaaaaaaaaaaaaaaaaaa\x1b[2;1Hbbbbbbbbbbbbbbbbbbb\x1b[3;1Hccccccccccccccccccc\x1b[5;20H",
         );
 
-        assert!(!plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(1),)));
+        assert!(!plugin.draw(&mut frame_for(
+            &terminal,
+            &theme,
+            start + Duration::from_millis(1),
+        )));
     }
 
     #[test]
@@ -454,13 +470,18 @@ mod tests {
         let config = trail_config();
         let mut terminal = TerminalCore::new(20, 5);
         let mut plugin = CursorTrail::new(config);
+        let theme = Theme::default();
         let start = Instant::now();
 
         let _ = terminal.process_pty_input(b"\x1b[1;10H");
-        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
+        assert!(!plugin.draw(&mut frame_for(&terminal, &theme, start)));
 
         let _ = terminal.process_pty_input(b"\x1b[?1049h");
-        assert!(!plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(1),)));
+        assert!(!plugin.draw(&mut frame_for(
+            &terminal,
+            &theme,
+            start + Duration::from_millis(1),
+        )));
     }
 
     #[test]
@@ -507,7 +528,12 @@ mod tests {
         let _ = terminal.process_pty_input(b"\x1b[31mA\x1b[1G");
 
         assert_eq!(
-            trail_color(config, terminal.grid(), terminal.grid().cursor()),
+            trail_color(
+                config,
+                Theme::default(),
+                terminal.grid(),
+                terminal.grid().cursor()
+            ),
             [197, 15, 31]
         );
     }
@@ -517,13 +543,18 @@ mod tests {
         let config = trail_config();
         let mut terminal = TerminalCore::new(8, 1);
         let mut plugin = CursorTrail::new(config);
+        let theme = Theme::default();
         let start = Instant::now();
 
-        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
+        assert!(!plugin.draw(&mut frame_for(&terminal, &theme, start)));
 
         let _ = terminal.process_pty_input(b"\x1b[?2026h\x1b[8G");
 
-        assert!(!plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(1),)));
+        assert!(!plugin.draw(&mut frame_for(
+            &terminal,
+            &theme,
+            start + Duration::from_millis(1),
+        )));
     }
 
     #[test]
@@ -531,14 +562,19 @@ mod tests {
         let config = trail_config();
         let mut terminal = TerminalCore::new(8, 2);
         let mut plugin = CursorTrail::new(config);
+        let theme = Theme::default();
         let start = Instant::now();
 
         let _ = terminal.process_pty_input(b"\x1b[1;8H");
-        assert!(!plugin.draw(&mut frame_for(&terminal, start)));
+        assert!(!plugin.draw(&mut frame_for(&terminal, &theme, start)));
 
         let _ = terminal.process_pty_input(b"\x1b[2;1H");
 
-        assert!(!plugin.draw(&mut frame_for(&terminal, start + Duration::from_millis(30),)));
+        assert!(!plugin.draw(&mut frame_for(
+            &terminal,
+            &theme,
+            start + Duration::from_millis(30),
+        )));
     }
 
     #[test]
@@ -559,6 +595,7 @@ mod tests {
         let start = Instant::now();
         plugin.snap_to_cursor(
             terminal.grid(),
+            Theme::default(),
             Cursor {
                 x: 0,
                 y: 0,
@@ -569,6 +606,7 @@ mod tests {
         );
         plugin.set_target(
             terminal.grid(),
+            Theme::default(),
             Cursor {
                 x: 3,
                 y: 0,
