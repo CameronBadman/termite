@@ -15,6 +15,7 @@ pub enum ParserAction {
     ReverseIndex,
     SetScrollRegion { top: u16, bottom: u16 },
     ClearScreen(EraseMode),
+    ClearScrollback,
     ClearLine(EraseMode),
     EraseChars(u16),
     DeleteChars(u16),
@@ -198,9 +199,13 @@ impl vte::Perform for ActionPerformer<'_> {
                 x: param(params, 1, 1).saturating_sub(1),
                 y: param(params, 0, 1).saturating_sub(1),
             }),
-            'J' => self
-                .actions
-                .push(ParserAction::ClearScreen(erase_mode(params))),
+            'J' => {
+                self.actions
+                    .push(ParserAction::ClearScreen(erase_mode(params)));
+                if param(params, 0, 0) == 3 {
+                    self.actions.push(ParserAction::ClearScrollback);
+                }
+            }
             'K' => self
                 .actions
                 .push(ParserAction::ClearLine(erase_mode(params))),

@@ -1,7 +1,11 @@
+use std::collections::VecDeque;
+
 use crate::{
     Cursor, DamageBatch, Grid, MouseTracking, ParserAction, ParserAdapter, SimpleParser, Style,
     StyleUpdate, TerminalMode,
 };
+
+const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreTick {
@@ -25,6 +29,8 @@ pub struct MouseState {
 pub struct TerminalCore<P = SimpleParser> {
     grid: Grid,
     alternate_grid: Option<Grid>,
+    scrollback: VecDeque<Vec<crate::Cell>>,
+    scrollback_capacity: usize,
     parser: P,
     style: Style,
     saved_cursor: Option<Cursor>,
@@ -47,6 +53,8 @@ where
         Self {
             grid: Grid::new(width, height),
             alternate_grid: None,
+            scrollback: VecDeque::new(),
+            scrollback_capacity: DEFAULT_SCROLLBACK_LINES,
             parser,
             style: Style::default(),
             saved_cursor: None,
@@ -62,6 +70,18 @@ where
 
     pub fn mouse(&self) -> MouseState {
         self.mouse
+    }
+
+    pub fn is_alternate_screen(&self) -> bool {
+        self.alternate_grid.is_some()
+    }
+
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    pub fn scrollback_row(&self, index: usize) -> Option<&[crate::Cell]> {
+        self.scrollback.get(index).map(Vec::as_slice)
     }
 
     pub fn disable_synchronized_update(&mut self) {
@@ -142,6 +162,7 @@ where
                 let _ = self.grid.move_cursor_relative(dx, dy);
             }
             ParserAction::ClearScreen(mode) => self.grid.clear_screen(mode),
+            ParserAction::ClearScrollback => self.scrollback.clear(),
             ParserAction::ClearLine(mode) => self.grid.clear_line(mode),
             ParserAction::EraseChars(count) => self.grid.erase_chars(count),
             ParserAction::DeleteChars(count) => self.grid.delete_chars(count),
@@ -207,6 +228,7 @@ where
         let height = self.grid.height();
         self.grid = Grid::new(width, height);
         self.alternate_grid = None;
+        self.scrollback.clear();
         self.style = Style::default();
         self.saved_cursor = None;
         self.last_printed = ' ';
@@ -229,6 +251,17 @@ where
     }
 
     fn tick(&mut self) -> CoreTick {
+        if self.alternate_grid.is_none() {
+            for row in self.grid.drain_scrolled_rows() {
+                self.scrollback.push_back(row);
+                while self.scrollback.len() > self.scrollback_capacity {
+                    self.scrollback.pop_front();
+                }
+            }
+        } else {
+            let _ = self.grid.drain_scrolled_rows();
+        }
+
         CoreTick {
             damage: self.grid.drain_damage(),
             output: std::mem::take(&mut self.output),
@@ -275,6 +308,17 @@ mod tests {
 
         assert_eq!(row_text(terminal.grid(), 0), "    ");
         assert_eq!(row_text(terminal.grid(), 1), "    ");
+    }
+
+    #[test]
+    fn clear_scrollback_sequence_removes_history() {
+        let mut terminal = TerminalCore::new(3, 2);
+        let _ = terminal.process_pty_input(b"ab\r\ncd\r\nef");
+        assert_eq!(terminal.scrollback_len(), 1);
+
+        let _ = terminal.process_pty_input(b"\x1b[3J");
+
+        assert_eq!(terminal.scrollback_len(), 0);
     }
 
     #[test]
@@ -404,6 +448,23 @@ mod tests {
         assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'd');
         assert_eq!(terminal.grid().cell(0, 1).unwrap().ch, 'e');
         assert_eq!(terminal.grid().cell(1, 1).unwrap().ch, 'f');
+    }
+
+    #[test]
+    fn primary_full_screen_scroll_adds_scrollback() {
+        let mut terminal = TerminalCore::new(3, 2);
+        let _ = terminal.process_pty_input(b"ab\r\ncd\r\nef");
+
+        assert_eq!(terminal.scrollback_len(), 1);
+        assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "ab ");
+    }
+
+    #[test]
+    fn alternate_screen_scroll_does_not_add_scrollback() {
+        let mut terminal = TerminalCore::new(3, 2);
+        let _ = terminal.process_pty_input(b"\x1b[?1049hab\r\ncd\r\nef\x1b[?1049l");
+
+        assert_eq!(terminal.scrollback_len(), 0);
     }
 
     #[test]
@@ -618,5 +679,9 @@ mod tests {
         (0..grid.width())
             .map(|x| grid.cell(x, y).unwrap().ch)
             .collect()
+    }
+
+    fn row_slice_text(row: &[crate::Cell]) -> String {
+        row.iter().map(|cell| cell.ch).collect()
     }
 }

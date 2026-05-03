@@ -78,6 +78,7 @@ pub struct Grid {
     scroll_bottom: u16,
     wrap: bool,
     pending_wrap: bool,
+    scrolled_rows: Vec<Vec<Cell>>,
     generation: Generation,
     damage: DamageTracker,
 }
@@ -102,6 +103,7 @@ impl Grid {
             scroll_bottom: height.saturating_sub(1),
             wrap: true,
             pending_wrap: false,
+            scrolled_rows: Vec::new(),
             generation: 1,
             damage,
         }
@@ -415,6 +417,10 @@ impl Grid {
         self.damage.drain(self.generation)
     }
 
+    pub fn drain_scrolled_rows(&mut self) -> Vec<Vec<Cell>> {
+        std::mem::take(&mut self.scrolled_rows)
+    }
+
     pub fn invalidate(&mut self) {
         self.generation += 1;
         self.damage.mark(DamageRegion::Viewport);
@@ -491,6 +497,14 @@ impl Grid {
         let start = usize::from(top) * width;
         let end = (usize::from(bottom) + 1) * width;
         let count_cells = count * width;
+
+        if !down && top == 0 && bottom == self.height.saturating_sub(1) {
+            for row in 0..count {
+                let row_start = start + row * width;
+                self.scrolled_rows
+                    .push(self.cells[row_start..row_start + width].to_vec());
+            }
+        }
 
         if down {
             self.cells

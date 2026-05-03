@@ -11,7 +11,7 @@ use std::{
 
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
 use c_term_core::{
-    Color, CursorShape, DamageBatch, DamageRegion, Grid, MouseState, MouseTracking, Style,
+    Cell, Color, CursorShape, DamageBatch, DamageRegion, Grid, MouseState, MouseTracking, Style,
     TerminalCore,
 };
 use font8x8::{BASIC_FONTS, UnicodeFonts};
@@ -74,6 +74,7 @@ struct WindowBackend {
     render_upper_deadline: Option<Instant>,
     app_sync_deadline: Option<Instant>,
     redraw_pending: bool,
+    scroll_offset: usize,
 }
 
 struct RenderCache {
@@ -121,29 +122,45 @@ impl RenderCache {
     }
 
     fn update(&mut self, grid: &Grid) -> &[u8] {
-        let expected_len = frame_len(grid.width(), grid.height());
+        self.update_rows(grid.width(), grid.height(), |y| grid.row(y))
+    }
+
+    fn update_owned_rows(&mut self, width: u16, rows: &[Vec<Cell>]) -> &[u8] {
+        self.update_rows(width, rows.len() as u16, |y| {
+            rows.get(usize::from(y)).map(Vec::as_slice)
+        })
+    }
+
+    fn update_rows<'a>(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        mut row_at: impl FnMut(u16) -> Option<&'a [Cell]>,
+    ) -> &[u8] {
+        let expected_len = frame_len(cols, rows);
         if self.frame.len() != expected_len {
             self.frame.resize(expected_len, 0);
             self.dirty = true;
         }
-        if self.dirty_rows.len() != usize::from(grid.height()) {
-            self.dirty_rows.resize(usize::from(grid.height()), true);
+        if self.dirty_rows.len() != usize::from(rows) {
+            self.dirty_rows.resize(usize::from(rows), true);
             self.dirty = true;
         }
 
-        let width = usize::from(grid.width()) * CELL_WIDTH as usize;
+        let width = usize::from(cols) * CELL_WIDTH as usize;
         if self.dirty {
             self.frame.fill(0);
-            for y in 0..grid.height() {
-                self.text
-                    .draw_grid_row_to_frame(grid, &mut self.frame, width, y);
+            for y in 0..rows {
+                if let Some(row) = row_at(y) {
+                    self.text.draw_row_to_frame(row, &mut self.frame, width, y);
+                }
             }
             self.dirty_rows.fill(false);
             self.dirty = false;
             return &self.frame;
         }
 
-        for y in 0..grid.height() {
+        for y in 0..rows {
             let Some(dirty) = self.dirty_rows.get_mut(usize::from(y)) else {
                 continue;
             };
@@ -151,8 +168,9 @@ impl RenderCache {
                 continue;
             }
             clear_grid_row(&mut self.frame, width, y);
-            self.text
-                .draw_grid_row_to_frame(grid, &mut self.frame, width, y);
+            if let Some(row) = row_at(y) {
+                self.text.draw_row_to_frame(row, &mut self.frame, width, y);
+            }
             *dirty = false;
         }
 
@@ -201,6 +219,7 @@ impl WindowBackend {
             render_upper_deadline: None,
             app_sync_deadline: None,
             redraw_pending: false,
+            scroll_offset: 0,
         }
     }
 
@@ -263,7 +282,11 @@ impl WindowBackend {
     }
 
     fn apply_damage(&mut self, damage: &DamageBatch) {
-        self.render_cache.apply_damage(damage, self.rows);
+        if self.scroll_offset == 0 {
+            self.render_cache.apply_damage(damage, self.rows);
+        } else {
+            self.render_cache.invalidate();
+        }
     }
 
     fn handle_pty_bytes(&mut self, bytes: Vec<u8>) {
@@ -272,6 +295,15 @@ impl WindowBackend {
         };
         let tick = terminal.process_pty_input(&bytes);
         let synchronized = terminal.grid().is_synchronized();
+        if terminal.is_alternate_screen() && self.scroll_offset != 0 {
+            self.scroll_offset = 0;
+            self.render_cache.invalidate();
+        }
+        let max_scroll_offset = terminal.scrollback_len();
+        if self.scroll_offset > max_scroll_offset {
+            self.scroll_offset = max_scroll_offset;
+            self.render_cache.invalidate();
+        }
         let output = tick.output;
         self.apply_damage(&tick.damage);
         let now = Instant::now();
@@ -332,6 +364,40 @@ impl WindowBackend {
         self.mark_dirty();
     }
 
+    fn scroll_view(&mut self, delta: isize) -> bool {
+        let Some(terminal) = &self.terminal else {
+            return false;
+        };
+        if terminal.is_alternate_screen() {
+            return false;
+        }
+
+        let max_offset = terminal.scrollback_len();
+        let next = if delta >= 0 {
+            self.scroll_offset.saturating_add(delta as usize)
+        } else {
+            self.scroll_offset.saturating_sub(delta.unsigned_abs())
+        }
+        .min(max_offset);
+
+        if next == self.scroll_offset {
+            return false;
+        }
+        self.scroll_offset = next;
+        self.render_cache.invalidate();
+        self.mark_dirty();
+        true
+    }
+
+    fn snap_to_live(&mut self) {
+        if self.scroll_offset == 0 {
+            return;
+        }
+        self.scroll_offset = 0;
+        self.render_cache.invalidate();
+        self.mark_dirty();
+    }
+
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, event: KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
@@ -343,10 +409,27 @@ impl WindowBackend {
             return;
         }
 
+        if self.modifiers.shift_key() {
+            match event.logical_key.as_ref() {
+                Key::Named(NamedKey::PageUp) => {
+                    let lines = self.rows.saturating_sub(1).max(1) as isize;
+                    let _ = self.scroll_view(lines);
+                    return;
+                }
+                Key::Named(NamedKey::PageDown) => {
+                    let lines = self.rows.saturating_sub(1).max(1) as isize;
+                    let _ = self.scroll_view(-lines);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let Some(bytes) = encode_window_key(&event, self.modifiers) else {
             return;
         };
 
+        self.snap_to_live();
         if let Some(child) = &mut self.child
             && let Err(error) = child.master.write_all(&bytes)
         {
@@ -408,17 +491,20 @@ impl WindowBackend {
     }
 
     fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(cell) = self.mouse_position else {
-            return;
-        };
         let Some(terminal) = &self.terminal else {
             return;
         };
         let mouse = terminal.mouse();
         if mouse.tracking == MouseTracking::None {
+            for lines in wheel_scroll_lines(delta) {
+                let _ = self.scroll_view(lines);
+            }
             return;
         }
 
+        let Some(cell) = self.mouse_position else {
+            return;
+        };
         for code in wheel_codes(delta) {
             self.write_mouse_event(mouse, code, cell, false);
         }
@@ -442,7 +528,18 @@ impl WindowBackend {
         let Some(terminal) = &self.terminal else {
             return;
         };
-        self.render_cache.update(terminal.grid());
+
+        let history_rows = if self.scroll_offset > 0 && !terminal.is_alternate_screen() {
+            Some(scrollback_view_rows(terminal, self.scroll_offset))
+        } else {
+            None
+        };
+        if let Some(rows) = &history_rows {
+            self.render_cache
+                .update_owned_rows(terminal.grid().width(), rows);
+        } else {
+            self.render_cache.update(terminal.grid());
+        }
 
         let Some(pixels) = &mut self.pixels else {
             return;
@@ -451,13 +548,18 @@ impl WindowBackend {
         let frame = pixels.frame_mut();
         frame.copy_from_slice(&self.render_cache.frame);
         let now = Instant::now();
-        let plugin_active = self.plugins.draw(&mut PluginFrame {
-            frame,
-            width_px: usize::from(terminal.grid().width()) * CELL_WIDTH as usize,
-            grid: terminal.grid(),
-            now,
-        });
-        self.render_cache.draw_cursor(terminal.grid(), frame);
+        let plugin_active = if history_rows.is_none() {
+            let plugin_active = self.plugins.draw(&mut PluginFrame {
+                frame,
+                width_px: usize::from(terminal.grid().width()) * CELL_WIDTH as usize,
+                grid: terminal.grid(),
+                now,
+            });
+            self.render_cache.draw_cursor(terminal.grid(), frame);
+            plugin_active
+        } else {
+            false
+        };
         if let Err(error) = pixels.render() {
             eprintln!("c-term: GPU render failed: {error}");
         }
@@ -604,6 +706,33 @@ fn frame_len(cols: u16, rows: u16) -> usize {
     buffer_width(cols) as usize * buffer_height(rows) as usize * 4
 }
 
+fn scrollback_view_rows(terminal: &TerminalCore, scroll_offset: usize) -> Vec<Vec<Cell>> {
+    let grid = terminal.grid();
+    let width = usize::from(grid.width());
+    let height = usize::from(grid.height());
+    let history_len = terminal.scrollback_len();
+    let total_rows = history_len + height;
+    let start = total_rows
+        .saturating_sub(height)
+        .saturating_sub(scroll_offset.min(history_len));
+
+    (0..height)
+        .map(|y| {
+            let row = start + y;
+            if row < history_len {
+                terminal
+                    .scrollback_row(row)
+                    .map(<[Cell]>::to_vec)
+                    .unwrap_or_else(|| vec![Cell::default(); width])
+            } else {
+                grid.row((row - history_len) as u16)
+                    .map(<[Cell]>::to_vec)
+                    .unwrap_or_else(|| vec![Cell::default(); width])
+            }
+        })
+        .collect()
+}
+
 fn encode_window_key(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     if modifiers.alt_key() {
@@ -719,6 +848,20 @@ fn wheel_axis_codes(x: f32, y: f32) -> Vec<u8> {
     codes
 }
 
+fn wheel_scroll_lines(delta: MouseScrollDelta) -> Vec<isize> {
+    let raw = match delta {
+        MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+        MouseScrollDelta::PixelDelta(position) => position.y / f64::from(CELL_HEIGHT),
+    };
+    let lines = if raw.abs() < 1.0 {
+        raw.signum() as isize
+    } else {
+        raw.round() as isize
+    };
+    let lines = if lines == 0 { 1 } else { lines };
+    vec![lines.clamp(-12, 12)]
+}
+
 fn encode_mouse_event(
     mouse: MouseState,
     code: u8,
@@ -807,10 +950,7 @@ impl TextRenderer {
         }
     }
 
-    fn draw_grid_row_to_frame(&mut self, grid: &Grid, frame: &mut [u8], width: usize, y: u16) {
-        let Some(row) = grid.row(y) else {
-            return;
-        };
+    fn draw_row_to_frame(&mut self, row: &[Cell], frame: &mut [u8], width: usize, y: u16) {
         for (x, cell) in row.iter().enumerate() {
             let ch = if cell.spacer { ' ' } else { cell.ch };
             self.draw_cell(frame, width, x as u16, y, ch, cell.style);
