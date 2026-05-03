@@ -2,6 +2,8 @@
 
 Small Rust terminal emulator prototype.
 
+Licensed under GPL-3.0-only. See `LICENSE`.
+
 The workspace has two crates:
 
 - `c_term_core`: terminal parser, grid state, and damage tracking.
@@ -24,6 +26,8 @@ This is still an early renderer: glyphs are drawn with an 8x8 bitmap font into a
 framebuffer, not a proper shaped text/glyph-atlas pipeline yet.
 
 The app includes a small built-in cursor-line plugin in `crates/c_term_app/src/plugins.rs`.
+
+The cursor trail plugin is based on the visual behavior of kitty terminal's GPLv3 cursor trail.
 
 ## Compiled Config
 
