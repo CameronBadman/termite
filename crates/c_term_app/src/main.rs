@@ -1,5 +1,6 @@
 use std::{
     env,
+    error::Error,
     ffi::CString,
     fs::File,
     io::{self, IsTerminal, Read, Write},
@@ -8,6 +9,8 @@ use std::{
     thread,
     time::Duration,
 };
+
+mod window_backend;
 
 use c_term_app::{AppAction, TerminalApp};
 use c_term_core::{Color, Grid, Style};
@@ -33,7 +36,16 @@ fn main() {
     }
 }
 
-fn run() -> io::Result<()> {
+fn run() -> Result<(), Box<dyn Error>> {
+    if env::args().any(|arg| arg == "--host") {
+        run_host_backend()?;
+    } else {
+        window_backend::run_window_backend()?;
+    }
+    Ok(())
+}
+
+fn run_host_backend() -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other(
             "c-term must be run from an interactive terminal",
@@ -212,12 +224,12 @@ fn to_crossterm_color(color: Color) -> Option<style::Color> {
     }
 }
 
-struct PtyChild {
-    pid: nix::unistd::Pid,
-    master: File,
+pub(crate) struct PtyChild {
+    pub(crate) pid: nix::unistd::Pid,
+    pub(crate) master: File,
 }
 
-fn spawn_shell(shell: &str, cols: u16, rows: u16) -> io::Result<PtyChild> {
+pub(crate) fn spawn_shell(shell: &str, cols: u16, rows: u16) -> io::Result<PtyChild> {
     let winsize = Winsize {
         ws_row: rows,
         ws_col: cols,
@@ -245,14 +257,14 @@ fn owned_fd_to_file(fd: OwnedFd) -> File {
     File::from(fd)
 }
 
-fn child_has_exited(pid: nix::unistd::Pid) -> bool {
+pub(crate) fn child_has_exited(pid: nix::unistd::Pid) -> bool {
     matches!(
         waitpid(pid, Some(WaitPidFlag::WNOHANG)),
         Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) | Err(_)
     )
 }
 
-fn set_pty_winsize(fd: i32, cols: u16, rows: u16) -> io::Result<()> {
+pub(crate) fn set_pty_winsize(fd: i32, cols: u16, rows: u16) -> io::Result<()> {
     let winsize = Winsize {
         ws_row: rows,
         ws_col: cols,

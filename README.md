@@ -11,9 +11,8 @@ The workspace is split around the major ownership boundaries:
 - `c_term_plugins_host`: plugin registry, subscription fast path, event dispatch, and draw ordering.
 - `c_term_app`: app-level orchestration between core, renderer, and plugins.
 
-External integrations such as `smithay-client-toolkit`, EGL/OpenGL, `cosmic-text`, `vte`, and
-`libloading` are intentionally behind local traits/adapter boundaries in this scaffold so the
-architecture builds without network-fetched dependencies.
+The current parser uses `vte`. The first window backend uses `winit` plus `pixels`/`wgpu` to open a
+Wayland/X11 window and present a GPU-backed framebuffer.
 
 ## Run
 
@@ -21,12 +20,17 @@ architecture builds without network-fetched dependencies.
 cargo run -p c_term_app
 ```
 
-The current executable is a runnable PTY MVP: it launches `$SHELL`, switches the host terminal into
-raw alternate-screen mode, forwards keyboard input to the PTY, feeds PTY output through the core/app
-pipeline, and writes the child terminal stream to the host terminal.
+The default executable opens a new window, launches `$SHELL` in a PTY, feeds PTY bytes through the
+terminal core, and draws the resulting grid into a GPU-backed pixel surface. Rendering is
+event-driven: PTY output, keyboard input, resize, and compositor redraw requests drive frames.
 
-Exit by leaving the shell normally (`exit` or Ctrl-D). Ctrl-Q is also handled by the MVP as an
-emergency quit.
+Exit by leaving the shell normally (`exit` or Ctrl-D). Ctrl-Q is also handled as an emergency quit.
 
-This is not the Wayland/EGL/OpenGL window backend yet; that remains the next renderer backend.
-# c-term
+The previous in-terminal backend is still available for debugging:
+
+```bash
+cargo run -p c_term_app -- --host
+```
+
+This is still an early renderer: glyphs are drawn with an 8x8 bitmap font into a `wgpu` pixel
+framebuffer, not a proper shaped text/glyph-atlas pipeline yet.
