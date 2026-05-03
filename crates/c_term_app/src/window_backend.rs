@@ -34,6 +34,7 @@ use crate::{
 pub(crate) const CELL_WIDTH: u32 = 8;
 pub(crate) const CELL_HEIGHT: u32 = 16;
 const ANIMATION_FRAME_MS: u64 = 8;
+const FRAME_INTERVAL_MS: u64 = 8;
 const DELAYED_RENDER_LOWER_US: u64 = 150;
 const DELAYED_RENDER_UPPER_NS: u64 = 4_000_000;
 const APP_SYNC_TIMEOUT_MS: u64 = 1_000;
@@ -73,6 +74,8 @@ struct WindowBackend {
     render_lower_deadline: Option<Instant>,
     render_upper_deadline: Option<Instant>,
     app_sync_deadline: Option<Instant>,
+    frame_deadline: Option<Instant>,
+    last_render: Option<Instant>,
     redraw_pending: bool,
     scroll_offset: usize,
 }
@@ -81,6 +84,7 @@ struct RenderCache {
     frame: Vec<u8>,
     dirty_rows: Vec<bool>,
     dirty: bool,
+    scroll_start: Option<usize>,
     text: TextRenderer,
 }
 
@@ -90,6 +94,7 @@ impl RenderCache {
             frame: Vec::new(),
             dirty_rows: Vec::new(),
             dirty: true,
+            scroll_start: None,
             text: TextRenderer::new(font),
         }
     }
@@ -122,13 +127,81 @@ impl RenderCache {
     }
 
     fn update(&mut self, grid: &Grid) -> &[u8] {
+        self.scroll_start = None;
         self.update_rows(grid.width(), grid.height(), |y| grid.row(y))
     }
 
-    fn update_owned_rows(&mut self, width: u16, rows: &[Vec<Cell>]) -> &[u8] {
-        self.update_rows(width, rows.len() as u16, |y| {
-            rows.get(usize::from(y)).map(Vec::as_slice)
-        })
+    fn update_scrollback(&mut self, terminal: &TerminalCore, scroll_offset: usize) -> &[u8] {
+        let grid = terminal.grid();
+        let cols = grid.width();
+        let rows = grid.height();
+        let height = usize::from(rows);
+        let history_len = terminal.scrollback_len();
+        let total_rows = history_len + height;
+        let start = total_rows
+            .saturating_sub(height)
+            .saturating_sub(scroll_offset.min(history_len));
+
+        self.ensure_shape(cols, rows);
+        let width = usize::from(cols) * CELL_WIDTH as usize;
+        let previous = self.scroll_start;
+
+        if self.dirty || previous.is_none() {
+            self.frame.fill(0);
+            for y in 0..rows {
+                if let Some(row) = scrollback_row_at(terminal, start + usize::from(y)) {
+                    self.text
+                        .draw_row_to_frame(row, &mut self.frame, width, y, cols);
+                }
+            }
+            self.dirty_rows.fill(false);
+            self.dirty = false;
+            self.scroll_start = Some(start);
+            return &self.frame;
+        }
+
+        let previous = previous.unwrap_or(start);
+        if previous == start {
+            return &self.frame;
+        }
+
+        let row_bytes = CELL_HEIGHT as usize * width * 4;
+        let delta = start as isize - previous as isize;
+        let distance = delta.unsigned_abs();
+        if distance >= height {
+            self.frame.fill(0);
+            for y in 0..rows {
+                if let Some(row) = scrollback_row_at(terminal, start + usize::from(y)) {
+                    self.text
+                        .draw_row_to_frame(row, &mut self.frame, width, y, cols);
+                }
+            }
+        } else if delta > 0 {
+            self.frame
+                .copy_within(distance * row_bytes..height * row_bytes, 0);
+            for y in height - distance..height {
+                clear_grid_row(&mut self.frame, width, y as u16);
+                if let Some(row) = scrollback_row_at(terminal, start + y) {
+                    self.text
+                        .draw_row_to_frame(row, &mut self.frame, width, y as u16, cols);
+                }
+            }
+        } else {
+            self.frame
+                .copy_within(0..(height - distance) * row_bytes, distance * row_bytes);
+            for y in 0..distance {
+                clear_grid_row(&mut self.frame, width, y as u16);
+                if let Some(row) = scrollback_row_at(terminal, start + y) {
+                    self.text
+                        .draw_row_to_frame(row, &mut self.frame, width, y as u16, cols);
+                }
+            }
+        }
+
+        self.dirty_rows.fill(false);
+        self.dirty = false;
+        self.scroll_start = Some(start);
+        &self.frame
     }
 
     fn update_rows<'a>(
@@ -152,7 +225,8 @@ impl RenderCache {
             self.frame.fill(0);
             for y in 0..rows {
                 if let Some(row) = row_at(y) {
-                    self.text.draw_row_to_frame(row, &mut self.frame, width, y);
+                    self.text
+                        .draw_row_to_frame(row, &mut self.frame, width, y, cols);
                 }
             }
             self.dirty_rows.fill(false);
@@ -169,12 +243,25 @@ impl RenderCache {
             }
             clear_grid_row(&mut self.frame, width, y);
             if let Some(row) = row_at(y) {
-                self.text.draw_row_to_frame(row, &mut self.frame, width, y);
+                self.text
+                    .draw_row_to_frame(row, &mut self.frame, width, y, cols);
             }
             *dirty = false;
         }
 
         &self.frame
+    }
+
+    fn ensure_shape(&mut self, cols: u16, rows: u16) {
+        let expected_len = frame_len(cols, rows);
+        if self.frame.len() != expected_len {
+            self.frame.resize(expected_len, 0);
+            self.dirty = true;
+        }
+        if self.dirty_rows.len() != usize::from(rows) {
+            self.dirty_rows.resize(usize::from(rows), true);
+            self.dirty = true;
+        }
     }
 
     fn draw_cursor(&mut self, grid: &Grid, frame: &mut [u8]) {
@@ -218,6 +305,8 @@ impl WindowBackend {
             render_lower_deadline: None,
             render_upper_deadline: None,
             app_sync_deadline: None,
+            frame_deadline: None,
+            last_render: None,
             redraw_pending: false,
             scroll_offset: 0,
         }
@@ -257,10 +346,35 @@ impl WindowBackend {
     }
 
     fn mark_dirty(&mut self) {
-        if !self.redraw_pending
-            && let Some(window) = &self.window
-        {
+        self.request_frame(Instant::now());
+    }
+
+    fn request_frame(&mut self, now: Instant) {
+        if self.redraw_pending {
+            return;
+        }
+
+        if let Some(last_render) = self.last_render {
+            let next_frame = last_render + Duration::from_millis(FRAME_INTERVAL_MS);
+            if now < next_frame {
+                self.frame_deadline = Some(
+                    self.frame_deadline
+                        .map_or(next_frame, |deadline| deadline.min(next_frame)),
+                );
+                return;
+            }
+        }
+
+        self.request_redraw_now();
+    }
+
+    fn request_redraw_now(&mut self) {
+        if self.redraw_pending {
+            return;
+        }
+        if let Some(window) = &self.window {
             self.redraw_pending = true;
+            self.frame_deadline = None;
             window.request_redraw();
         }
     }
@@ -384,7 +498,6 @@ impl WindowBackend {
             return false;
         }
         self.scroll_offset = next;
-        self.render_cache.invalidate();
         self.mark_dirty();
         true
     }
@@ -524,19 +637,17 @@ impl WindowBackend {
 
     fn render(&mut self) {
         self.redraw_pending = false;
+        self.frame_deadline = None;
+        let render_started = Instant::now();
         self.disarm_delayed_render();
         let Some(terminal) = &self.terminal else {
             return;
         };
 
-        let history_rows = if self.scroll_offset > 0 && !terminal.is_alternate_screen() {
-            Some(scrollback_view_rows(terminal, self.scroll_offset))
-        } else {
-            None
-        };
-        if let Some(rows) = &history_rows {
+        let viewing_history = self.scroll_offset > 0 && !terminal.is_alternate_screen();
+        if viewing_history {
             self.render_cache
-                .update_owned_rows(terminal.grid().width(), rows);
+                .update_scrollback(terminal, self.scroll_offset);
         } else {
             self.render_cache.update(terminal.grid());
         }
@@ -547,13 +658,12 @@ impl WindowBackend {
 
         let frame = pixels.frame_mut();
         frame.copy_from_slice(&self.render_cache.frame);
-        let now = Instant::now();
-        let plugin_active = if history_rows.is_none() {
+        let plugin_active = if !viewing_history {
             let plugin_active = self.plugins.draw(&mut PluginFrame {
                 frame,
                 width_px: usize::from(terminal.grid().width()) * CELL_WIDTH as usize,
                 grid: terminal.grid(),
-                now,
+                now: render_started,
             });
             self.render_cache.draw_cursor(terminal.grid(), frame);
             plugin_active
@@ -563,8 +673,9 @@ impl WindowBackend {
         if let Err(error) = pixels.render() {
             eprintln!("c-term: GPU render failed: {error}");
         }
+        self.last_render = Some(Instant::now());
         if plugin_active {
-            self.schedule_animation(now);
+            self.schedule_animation(render_started);
         } else {
             self.animation_deadline = None;
         }
@@ -582,7 +693,7 @@ impl WindowBackend {
                 terminal.disable_synchronized_update();
             }
             self.render_cache.invalidate();
-            self.mark_dirty();
+            self.request_frame(now);
         }
 
         let render_due = self
@@ -593,7 +704,7 @@ impl WindowBackend {
                 .is_some_and(|deadline| deadline <= now);
         if render_due {
             self.disarm_delayed_render();
-            self.mark_dirty();
+            self.request_frame(now);
         }
 
         if self
@@ -601,7 +712,11 @@ impl WindowBackend {
             .is_some_and(|deadline| deadline <= now)
         {
             self.animation_deadline = None;
-            self.mark_dirty();
+            self.request_frame(now);
+        }
+
+        if self.frame_deadline.is_some_and(|deadline| deadline <= now) {
+            self.request_redraw_now();
         }
 
         if let Some(deadline) = self.next_deadline() {
@@ -617,6 +732,7 @@ impl WindowBackend {
             self.render_lower_deadline,
             self.render_upper_deadline,
             self.app_sync_deadline,
+            self.frame_deadline,
         ]
         .into_iter()
         .flatten()
@@ -706,31 +822,14 @@ fn frame_len(cols: u16, rows: u16) -> usize {
     buffer_width(cols) as usize * buffer_height(rows) as usize * 4
 }
 
-fn scrollback_view_rows(terminal: &TerminalCore, scroll_offset: usize) -> Vec<Vec<Cell>> {
+fn scrollback_row_at(terminal: &TerminalCore, row: usize) -> Option<&[Cell]> {
     let grid = terminal.grid();
-    let width = usize::from(grid.width());
-    let height = usize::from(grid.height());
     let history_len = terminal.scrollback_len();
-    let total_rows = history_len + height;
-    let start = total_rows
-        .saturating_sub(height)
-        .saturating_sub(scroll_offset.min(history_len));
-
-    (0..height)
-        .map(|y| {
-            let row = start + y;
-            if row < history_len {
-                terminal
-                    .scrollback_row(row)
-                    .map(<[Cell]>::to_vec)
-                    .unwrap_or_else(|| vec![Cell::default(); width])
-            } else {
-                grid.row((row - history_len) as u16)
-                    .map(<[Cell]>::to_vec)
-                    .unwrap_or_else(|| vec![Cell::default(); width])
-            }
-        })
-        .collect()
+    if row < history_len {
+        terminal.scrollback_row(row)
+    } else {
+        grid.row((row - history_len) as u16)
+    }
 }
 
 fn encode_window_key(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
@@ -950,10 +1049,18 @@ impl TextRenderer {
         }
     }
 
-    fn draw_row_to_frame(&mut self, row: &[Cell], frame: &mut [u8], width: usize, y: u16) {
-        for (x, cell) in row.iter().enumerate() {
+    fn draw_row_to_frame(
+        &mut self,
+        row: &[Cell],
+        frame: &mut [u8],
+        width: usize,
+        y: u16,
+        cols: u16,
+    ) {
+        for x in 0..cols {
+            let cell = row.get(usize::from(x)).copied().unwrap_or_default();
             let ch = if cell.spacer { ' ' } else { cell.ch };
-            self.draw_cell(frame, width, x as u16, y, ch, cell.style);
+            self.draw_cell(frame, width, x, y, ch, cell.style);
         }
     }
 
@@ -1321,6 +1428,31 @@ mod tests {
             &frame[..CELL_HEIGHT as usize * 4 * CELL_WIDTH as usize * 4],
             first_row.as_slice()
         );
+    }
+
+    #[test]
+    fn scrollback_cache_handles_resized_history_rows() {
+        let mut terminal = TerminalCore::new(3, 2);
+        let _ = terminal.process_pty_input(b"ab\r\ncd\r\nef");
+        let _ = terminal.resize(5, 2);
+        let mut cache = RenderCache::new(FontConfig::Bitmap8x8);
+
+        let frame = cache.update_scrollback(&terminal, 1);
+
+        assert_eq!(frame.len(), frame_len(5, 2));
+    }
+
+    #[test]
+    fn scrollback_cache_keeps_incremental_scrolls_clean() {
+        let mut terminal = TerminalCore::new(3, 2);
+        let _ = terminal.process_pty_input(b"aa\r\nbb\r\ncc\r\ndd");
+        let mut cache = RenderCache::new(FontConfig::Bitmap8x8);
+
+        let _ = cache.update_scrollback(&terminal, 1);
+        let _ = cache.update_scrollback(&terminal, 2);
+
+        assert_eq!(cache.scroll_start, Some(0));
+        assert!(!cache.dirty);
     }
 
     #[test]
