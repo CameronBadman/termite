@@ -4,28 +4,40 @@
 
 Termite is a small Wayland terminal emulator written in Rust.
 
-It is intentionally opinionated: GPU-rendered, event-driven, configured in Rust,
-and extended through in-process plugins that you compile into the binary. It is
-not trying to be every terminal. The goal is a fast, readable terminal that is
-easy to hack on.
+It is intentionally opinionated: GPU-rendered, event-driven, configured in
+Rust, and extended through in-process plugins compiled into the binary. The goal
+is not full terminal feature parity. The goal is a fast terminal that is easy to
+read, hack on, and shape for a personal workflow.
 
 Licensed under GPL-3.0-only. See `LICENSE`.
 
-## Shape
+## Status
 
-The workspace has two crates:
+Termite is usable for day-to-day shell, tmux, and editor work on Wayland, but it
+is still young.
 
-- `c_term_core`: parser, grid state, scrollback, terminal modes, and damage
-  tracking.
-- `c_term_app`: PTY/window integration, rendering, compiled config, and
-  built-in plugins.
+Works now:
 
-The app is Wayland-focused. It opens a `winit` window, launches `$SHELL` in a
-PTY, processes terminal output through `c_term_core`, and renders the grid with
-`wgpu`.
+- Wayland window via `winit`
+- GPU presentation via `wgpu`
+- PTY-backed shell
+- event-driven redraws
+- scrollback with Shift-PageUp and Shift-PageDown
+- mouse reporting for tmux/nvim-style TUIs
+- mouse selection, Ctrl-Shift-C copy, Ctrl-Shift-V paste
+- OSC 52 clipboard writes, including tmux copy mode
+- truecolor, indexed color, basic style attributes, alternate screen
+- compiled Rust config for theme, font, opacity, and plugins
+- built-in cursor line, screen opacity, and cursor trail plugins
 
-Rendering is event-driven. PTY output, input, resize events, animation timers,
-and compositor redraw requests drive frames.
+Known gaps:
+
+- Wayland only
+- no scrollback search yet
+- no custom keybinding config yet
+- no full terminal conformance claim
+- `TERM` still defaults to `xterm-256color` until custom terminfo is worth
+  requiring
 
 ## Run
 
@@ -36,33 +48,51 @@ cargo run --release -p c_term_app
 Exit the shell normally with `exit` or Ctrl-D. Ctrl-Q is also handled as an
 emergency quit.
 
-Mouse drag selects visible text. Ctrl-Shift-C copies the selection, and
-Ctrl-Shift-V pastes through the Wayland clipboard. OSC 52 clipboard writes are
-also supported, so tmux copy mode can copy out through tmux's default
-`xterm*:clipboard` support.
+## Controls
 
-If a tmux config has disabled clipboard handling, restore it with:
+| Action | Input |
+| --- | --- |
+| Copy selected text | Ctrl-Shift-C |
+| Paste clipboard | Ctrl-Shift-V |
+| Scroll history | Shift-PageUp / Shift-PageDown |
+| Select text | Mouse drag |
+| Select text while an app tracks mouse | Shift-drag |
+| Quit Termite | Ctrl-Q |
+
+Mouse wheel scrolls history when the active application has not enabled mouse
+tracking. When tmux, nvim, or another TUI enables mouse tracking, wheel and
+clicks are sent to the application.
+
+## Tmux Clipboard
+
+Tmux copy mode uses OSC 52 to copy out to the host terminal. Termite handles
+that sequence and writes to the Wayland clipboard.
+
+For tmux 3.5a, the default `xterm*:clipboard` feature is enough when Termite is
+running as `TERM=xterm-256color`. If a local tmux config has disabled clipboard
+handling, restore it with:
 
 ```tmux
 set -g set-clipboard on
 set -as terminal-features ',xterm-256color:clipboard'
 ```
 
-## Terminal Identity
+After rebuilding Termite, restart the Termite window so tmux sees the new
+binary and terminal behavior.
 
-Termite currently launches shells with `TERM=xterm-256color` plus
-`TERM_PROGRAM=termite`. That is deliberate: most systems already have a good
-`xterm-256color` terminfo entry, while a custom `TERM=termite` would require
-users to install terminfo before basic tools work.
+## Project Shape
 
-The project still keeps its identity in one place in `c_term_core::identity`.
-That module defines the advertised term name, program name, and terminal query
-responses. A draft terminfo source is included at `terminfo/termite.terminfo`
-for the point where switching to `TERM=termite` becomes worth it:
+The workspace has two crates:
 
-```bash
-tic -x terminfo/termite.terminfo
-```
+- `c_term_core`: parser, grid state, scrollback, terminal modes, identity, and
+  damage tracking.
+- `c_term_app`: PTY/window integration, rendering, compiled config, clipboard
+  integration, and built-in plugins.
+
+Rendering is event-driven. PTY output, input, resize events, animation timers,
+and compositor redraw requests drive frames. The CPU side maintains a terminal
+grid and damage model; the app side renders updated rows into a texture and
+presents with `wgpu`.
 
 ## Compiled Config
 
@@ -78,7 +108,11 @@ pub(crate) fn runner() -> Runner {
         .with(terminal_theme())
         .with(terminal_plugins())
 }
+```
 
+Plugins and presets are composed with `parts()`:
+
+```rust
 fn terminal_plugins() -> impl RunnerPart {
     parts()
         .with(screen_opacity_plugin())
@@ -87,66 +121,25 @@ fn terminal_plugins() -> impl RunnerPart {
 }
 ```
 
-`parts()` can be nested, so local presets can stay small:
+This is closer to dwm-style compiled configuration than runtime config files.
 
-```rust
-fn daily_driver() -> impl RunnerPart {
-    parts()
-        .with(terminal_theme())
-        .with(visual_plugins())
-}
+## Docs
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Compiled Config And Plugins](docs/CONFIG_AND_PLUGINS.md)
+- [Terminal Identity And Clipboard](docs/TERMINAL_IDENTITY.md)
+
+## Terminfo
+
+Termite currently launches shells with `TERM=xterm-256color` plus
+`TERM_PROGRAM=termite`. That keeps basic tools working without installing a
+custom terminfo entry.
+
+A draft terminfo source is included for later:
+
+```bash
+tic -x terminfo/termite.terminfo
 ```
 
-## Theme
-
-Colors are configured before rendering, not as a post-process tint. The theme
-sets default foreground/background plus the 16 ANSI colors:
-
-```rust
-fn terminal_theme() -> impl RunnerPart {
-    theme(Theme {
-        foreground: [224, 228, 232],
-        background: [10, 12, 16],
-        ansi: [
-            [12, 12, 12],     // black
-            [230, 75, 95],   // red
-            [82, 196, 120],  // green
-            [229, 181, 103], // yellow
-            [91, 156, 235],  // blue
-            [190, 118, 235], // magenta
-            [74, 207, 207],  // cyan
-            [210, 214, 220], // white
-            [118, 124, 136],
-            [255, 105, 125],
-            [115, 225, 145],
-            [245, 209, 125],
-            [125, 180, 255],
-            [215, 145, 255],
-            [105, 235, 235],
-            [245, 247, 250],
-        ],
-    })
-}
-```
-
-## Plugins
-
-Plugins are Rust types that implement `Plugin`. They receive a `PluginFrame`
-with access to the current grid, time, theme, overlay commands, and window
-opacity.
-
-Built-ins:
-
-- `ScreenOpacity`: makes the compositor-visible Wayland window translucent.
-- `CursorLine`: minimal example plugin. It emits a row and cell overlay.
-- `CursorTrail`: advanced animated example plugin based on the visual behavior
-  of kitty terminal's GPLv3 cursor trail.
-
-The intended workflow is simple: add a plugin module, add it to
-`terminal_plugins()`, rebuild.
-
-## Notes
-
-Text rendering is deliberately simple right now. The default path uses an 8x16
-bitmap-style cell renderer with optional TTF glyph rasterization. There is no
-goal to chase full terminal feature parity unless a feature fits the project.
+See [Terminal Identity And Clipboard](docs/TERMINAL_IDENTITY.md) for the
+details.
