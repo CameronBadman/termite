@@ -775,7 +775,7 @@ fn cursor_uniform(grid: &Grid) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::text::{box_segments, draw_box_cell};
+    use super::text::{bitmap_glyph, box_segments, draw_box_cell};
     use super::*;
     use crate::window_backend::render_cache::frame_len;
     use c_term_core::TerminalCore;
@@ -808,6 +808,15 @@ mod tests {
     #[test]
     fn non_box_characters_use_font_path() {
         assert_eq!(box_segments('A'), None);
+    }
+
+    #[test]
+    fn bitmap_font_covers_extended_terminal_glyphs() {
+        assert!(bitmap_glyph('A').is_some());
+        assert!(bitmap_glyph('é').is_some());
+        assert!(bitmap_glyph('═').is_some());
+        assert!(bitmap_glyph('█').is_some());
+        assert!(bitmap_glyph('░').is_some());
     }
 
     #[test]

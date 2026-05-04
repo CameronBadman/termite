@@ -2,7 +2,10 @@ use std::{collections::HashMap, fs};
 
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
 use c_term_core::{Cell, Style};
-use font8x8::{BASIC_FONTS, UnicodeFonts};
+use font8x8::{
+    BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
+    SGA_FONTS, UnicodeFonts,
+};
 
 use crate::{runner::FontConfig, theme::Theme};
 
@@ -85,7 +88,7 @@ impl TextRenderer {
                     }
                 }
             } else {
-                draw_font8x8_cell(frame, width, cell_x, cell_y, ch, fg, bg);
+                draw_bitmap_cell(frame, width, cell_x, cell_y, ch, (fg, bg), style.bold);
             }
         }
         if style.underline {
@@ -225,29 +228,41 @@ fn blend_pixel(pixel: &mut [u8], color: [u8; 3], alpha: u8) {
     pixel[3] = 0xff;
 }
 
-fn draw_font8x8_cell(
+fn draw_bitmap_cell(
     frame: &mut [u8],
     width: usize,
     cell_x: u16,
     cell_y: u16,
     ch: char,
-    fg: [u8; 3],
-    bg: [u8; 3],
+    colors: ([u8; 3], [u8; 3]),
+    bold: bool,
 ) {
-    let glyph = BASIC_FONTS
-        .get(ch)
-        .or_else(|| BASIC_FONTS.get('?'))
-        .unwrap_or([0; 8]);
+    let (fg, bg) = colors;
+    let glyph = bitmap_glyph(ch).unwrap_or_else(|| bitmap_glyph('?').unwrap_or([0; 8]));
     let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
     let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
     for py in 0..CELL_HEIGHT as usize {
         let glyph_row = glyph[py / 2];
         for px in 0..CELL_WIDTH as usize {
-            let color = if ((glyph_row >> px) & 1) != 0 { fg } else { bg };
+            let bit = ((glyph_row >> px) & 1) != 0
+                || (bold && px > 0 && ((glyph_row >> (px - 1)) & 1) != 0);
+            let color = if bit { fg } else { bg };
             let index = ((origin_y + py) * width + origin_x + px) * 4;
             frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
         }
     }
+}
+
+pub(super) fn bitmap_glyph(ch: char) -> Option<[u8; 8]> {
+    BASIC_FONTS
+        .get(ch)
+        .or_else(|| LATIN_FONTS.get(ch))
+        .or_else(|| BOX_FONTS.get(ch))
+        .or_else(|| BLOCK_FONTS.get(ch))
+        .or_else(|| MISC_FONTS.get(ch))
+        .or_else(|| GREEK_FONTS.get(ch))
+        .or_else(|| HIRAGANA_FONTS.get(ch))
+        .or_else(|| SGA_FONTS.get(ch))
 }
 
 fn draw_underline(frame: &mut [u8], width: usize, cell_x: u16, cell_y: u16, color: [u8; 3]) {
