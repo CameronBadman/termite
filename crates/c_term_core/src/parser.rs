@@ -27,6 +27,7 @@ pub enum ParserAction {
     SetMode { mode: TerminalMode, enabled: bool },
     SetCursorShape(crate::CursorShape),
     SetStyle(StyleUpdate),
+    ClipboardStore { clipboard: u8, base64: Vec<u8> },
     ReportMode(u16),
     Respond(Vec<u8>),
     ResetStyle,
@@ -72,22 +73,12 @@ pub enum MouseTracking {
     Any,
 }
 
+#[derive(Default)]
 pub struct SimpleParser {
-    parser: vte::Parser,
+    parser: vte::Parser<262_144>,
     g0_line_drawing: bool,
     g1_line_drawing: bool,
     use_g1: bool,
-}
-
-impl Default for SimpleParser {
-    fn default() -> Self {
-        Self {
-            parser: vte::Parser::new(),
-            g0_line_drawing: false,
-            g1_line_drawing: false,
-            use_g1: false,
-        }
-    }
 }
 
 impl std::fmt::Debug for SimpleParser {
@@ -279,6 +270,15 @@ impl vte::Perform for ActionPerformer<'_> {
             self.actions.push(ParserAction::Respond(
                 b"\x1b]11;rgb:1010/1212/1818\x1b\\".to_vec(),
             ));
+        }
+        if let [b"52", clipboard, base64] = params
+            && let Some(clipboard) = clipboard.first()
+            && base64 != b"?"
+        {
+            self.actions.push(ParserAction::ClipboardStore {
+                clipboard: *clipboard,
+                base64: base64.to_vec(),
+            });
         }
     }
 }

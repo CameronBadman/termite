@@ -8,4 +8,4 @@ pub use grid::{Cell, Color, Cursor, CursorShape, Grid, Style};
 pub use parser::{
     EraseMode, MouseTracking, ParserAction, ParserAdapter, SimpleParser, StyleUpdate, TerminalMode,
 };
-pub use terminal::{CoreTick, MouseState, TerminalCore};
+pub use terminal::{ClipboardStore, CoreTick, MouseState, TerminalCore};

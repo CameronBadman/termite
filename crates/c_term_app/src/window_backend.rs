@@ -6,7 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use c_term_core::{CursorShape, DamageBatch, Grid, MouseState, MouseTracking, TerminalCore};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use c_term_core::{
+    ClipboardStore, CursorShape, DamageBatch, Grid, MouseState, MouseTracking, TerminalCore,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
@@ -216,11 +219,37 @@ impl WindowBackend {
         }
     }
 
+    fn handle_clipboard_store(store: ClipboardStore) {
+        let Ok(bytes) = STANDARD.decode(store.base64) else {
+            return;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+
+        let clipboard = match store.clipboard {
+            b'p' => wl_copy::ClipboardType::Primary,
+            _ => wl_copy::ClipboardType::Regular,
+        };
+        let source = wl_copy::Source::Bytes(text.into_bytes().into_boxed_slice());
+        let mut options = wl_copy::Options::new();
+        options.clipboard(clipboard);
+        if let Err(error) = options.copy(source, wl_copy::MimeType::Text) {
+            eprintln!("c-term: failed to store OSC 52 clipboard text: {error}");
+        }
+    }
+
     fn handle_pty_bytes(&mut self, bytes: Vec<u8>) {
         let Some(terminal) = &mut self.terminal else {
             return;
         };
         let tick = terminal.process_pty_input(&bytes);
+        for store in tick.clipboard {
+            Self::handle_clipboard_store(store);
+        }
         let synchronized = terminal.grid().is_synchronized();
         if terminal.is_alternate_screen() && self.scroll_offset != 0 {
             self.scroll_offset = 0;

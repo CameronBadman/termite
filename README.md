@@ -37,7 +37,9 @@ Exit the shell normally with `exit` or Ctrl-D. Ctrl-Q is also handled as an
 emergency quit.
 
 Mouse drag selects visible text. Ctrl-Shift-C copies the selection, and
-Ctrl-Shift-V pastes through the Wayland clipboard.
+Ctrl-Shift-V pastes through the Wayland clipboard. OSC 52 clipboard writes are
+also supported, so tmux copy mode can copy out when tmux `set-clipboard` is
+enabled.
 
 ## Compiled Config
 

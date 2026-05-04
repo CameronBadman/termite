@@ -11,12 +11,19 @@ const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 pub struct CoreTick {
     pub damage: DamageBatch,
     pub output: Vec<u8>,
+    pub clipboard: Vec<ClipboardStore>,
 }
 
 impl CoreTick {
     pub fn is_idle(&self) -> bool {
         self.damage.is_empty()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardStore {
+    pub clipboard: u8,
+    pub base64: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -37,6 +44,7 @@ pub struct TerminalCore<P = SimpleParser> {
     last_printed: char,
     mouse: MouseState,
     bracketed_paste: bool,
+    clipboard: Vec<ClipboardStore>,
     output: Vec<u8>,
 }
 
@@ -62,6 +70,7 @@ where
             last_printed: ' ',
             mouse: MouseState::default(),
             bracketed_paste: false,
+            clipboard: Vec::new(),
             output: Vec::new(),
         }
     }
@@ -180,6 +189,9 @@ where
             ParserAction::SetMode { mode, enabled } => self.set_mode(mode, enabled),
             ParserAction::SetCursorShape(shape) => self.grid.set_cursor_shape(shape),
             ParserAction::SetStyle(update) => self.apply_style(update),
+            ParserAction::ClipboardStore { clipboard, base64 } => {
+                self.clipboard.push(ClipboardStore { clipboard, base64 });
+            }
             ParserAction::ReportMode(mode) => self.report_mode(mode),
             ParserAction::Respond(bytes) => self.output.extend(bytes),
             ParserAction::ResetStyle => self.style = Style::default(),
@@ -273,6 +285,7 @@ where
         CoreTick {
             damage: self.grid.drain_damage(),
             output: std::mem::take(&mut self.output),
+            clipboard: std::mem::take(&mut self.clipboard),
         }
     }
 }
@@ -668,6 +681,16 @@ mod tests {
             terminal.process_pty_input(b"\x1b]11;?\x07").output,
             b"\x1b]11;rgb:1010/1212/1818\x1b\\"
         );
+    }
+
+    #[test]
+    fn osc52_clipboard_store_is_reported() {
+        let mut terminal = TerminalCore::new(2, 1);
+        let tick = terminal.process_pty_input(b"\x1b]52;c;aGVsbG8=\x07");
+
+        assert_eq!(tick.clipboard.len(), 1);
+        assert_eq!(tick.clipboard[0].clipboard, b'c');
+        assert_eq!(tick.clipboard[0].base64, b"aGVsbG8=");
     }
 
     #[test]
