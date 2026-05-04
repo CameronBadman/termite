@@ -142,14 +142,27 @@ impl vte::Perform for ActionPerformer<'_> {
             return;
         }
 
-        let private = is_private(intermediates);
-        if private && matches!(action, 'h' | 'l') {
+        let dec_private = intermediates.contains(&b'?');
+        let secondary_private = intermediates.contains(&b'>');
+        if dec_private && matches!(action, 'h' | 'l') {
             self.mode(params, action == 'h');
             return;
         }
-        if private && action == 'u' {
+        if dec_private && action == 'u' {
+            self.actions.push(ParserAction::Respond(
+                crate::KEYBOARD_PROTOCOL_QUERY.to_vec(),
+            ));
+            return;
+        }
+        if secondary_private && action == 'c' {
+            self.actions.push(ParserAction::Respond(
+                crate::SECONDARY_DEVICE_ATTRIBUTES.to_vec(),
+            ));
+            return;
+        }
+        if secondary_private && action == 'q' {
             self.actions
-                .push(ParserAction::Respond(b"\x1b[?0u".to_vec()));
+                .push(ParserAction::Respond(crate::version_reply()));
             return;
         }
         if intermediates == b" " && action == 'q' {
@@ -220,9 +233,9 @@ impl vte::Perform for ActionPerformer<'_> {
                 .actions
                 .push(ParserAction::EraseChars(param(params, 0, 1))),
             'b' => self.actions.push(ParserAction::Repeat(param(params, 0, 1))),
-            'c' => self
-                .actions
-                .push(ParserAction::Respond(b"\x1b[?1;2c".to_vec())),
+            'c' => self.actions.push(ParserAction::Respond(
+                crate::PRIMARY_DEVICE_ATTRIBUTES.to_vec(),
+            )),
             'd' => self.actions.push(ParserAction::MoveCursor {
                 x: u16::MAX,
                 y: param(params, 0, 1).saturating_sub(1),
@@ -268,7 +281,7 @@ impl vte::Perform for ActionPerformer<'_> {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         if matches!(params, [b"11", b"?"]) {
             self.actions.push(ParserAction::Respond(
-                b"\x1b]11;rgb:1010/1212/1818\x1b\\".to_vec(),
+                crate::DEFAULT_BACKGROUND_REPLY.to_vec(),
             ));
         }
         if let [b"52", clipboard, base64] = params
@@ -280,10 +293,6 @@ impl vte::Perform for ActionPerformer<'_> {
             });
         }
     }
-}
-
-fn is_private(intermediates: &[u8]) -> bool {
-    intermediates.contains(&b'?')
 }
 
 fn map_printed_char(ch: char, line_drawing: bool) -> char {

@@ -671,15 +671,29 @@ mod tests {
     fn terminal_queries_emit_pty_responses() {
         let mut terminal = TerminalCore::new(2, 1);
 
-        assert_eq!(terminal.process_pty_input(b"\x1b[c").output, b"\x1b[?1;2c");
-        assert_eq!(terminal.process_pty_input(b"\x1b[?u").output, b"\x1b[?0u");
+        assert_eq!(
+            terminal.process_pty_input(b"\x1b[c").output,
+            crate::PRIMARY_DEVICE_ATTRIBUTES
+        );
+        assert_eq!(
+            terminal.process_pty_input(b"\x1b[>c").output,
+            crate::SECONDARY_DEVICE_ATTRIBUTES
+        );
+        assert_eq!(
+            terminal.process_pty_input(b"\x1b[>q").output,
+            crate::version_reply()
+        );
+        assert_eq!(
+            terminal.process_pty_input(b"\x1b[?u").output,
+            crate::KEYBOARD_PROTOCOL_QUERY
+        );
         assert_eq!(
             terminal.process_pty_input(b"\x1b[?2026$p").output,
             b"\x1b[?2026;2$y"
         );
         assert_eq!(
             terminal.process_pty_input(b"\x1b]11;?\x07").output,
-            b"\x1b]11;rgb:1010/1212/1818\x1b\\"
+            crate::DEFAULT_BACKGROUND_REPLY
         );
     }
 

@@ -48,6 +48,22 @@ set -g set-clipboard on
 set -as terminal-features ',xterm-256color:clipboard'
 ```
 
+## Terminal Identity
+
+Termite currently launches shells with `TERM=xterm-256color` plus
+`TERM_PROGRAM=termite`. That is deliberate: most systems already have a good
+`xterm-256color` terminfo entry, while a custom `TERM=termite` would require
+users to install terminfo before basic tools work.
+
+The project still keeps its identity in one place in `c_term_core::identity`.
+That module defines the advertised term name, program name, and terminal query
+responses. A draft terminfo source is included at `terminfo/termite.terminfo`
+for the point where switching to `TERM=termite` becomes worth it:
+
+```bash
+tic -x terminfo/termite.terminfo
+```
+
 ## Compiled Config
 
 Configuration is Rust code in `crates/c_term_app/src/config.rs`.

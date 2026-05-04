@@ -11,6 +11,8 @@ use nix::{
     unistd::execvp,
 };
 
+use c_term_core::{PROGRAM, PROGRAM_VERSION, TERM};
+
 fn main() {
     if let Err(error) = config::runner().run() {
         eprintln!("c-term: {error}");
@@ -37,7 +39,9 @@ pub(crate) fn spawn_shell(shell: &str, cols: u16, rows: u16) -> io::Result<PtyCh
         }),
         ForkptyResult::Child => {
             unsafe {
-                env::set_var("TERM", "xterm-256color");
+                env::set_var("TERM", TERM);
+                env::set_var("TERM_PROGRAM", PROGRAM);
+                env::set_var("TERM_PROGRAM_VERSION", PROGRAM_VERSION);
             }
             let shell = CString::new(shell).unwrap_or_else(|_| CString::new("/bin/sh").unwrap());
             let _ = execvp(&shell, &[shell.as_c_str()]);
