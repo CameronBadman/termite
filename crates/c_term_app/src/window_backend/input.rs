@@ -45,6 +45,17 @@ pub(super) fn encode_window_key(event: &KeyEvent, modifiers: ModifiersState) -> 
     Some(bytes)
 }
 
+pub(super) fn shortcut_key(key: &Key, modifiers: ModifiersState, target: char) -> bool {
+    modifiers.control_key()
+        && modifiers.shift_key()
+        && matches!(
+            key.as_ref(),
+            Key::Character(ch)
+                if ch.chars().next().is_some_and(|ch| ch.eq_ignore_ascii_case(&target))
+                    && ch.chars().nth(1).is_none()
+        )
+}
+
 fn ctrl_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_alphabetic() {
@@ -225,5 +236,14 @@ mod tests {
             ),
             b"[<84;1;1M"
         );
+    }
+
+    #[test]
+    fn ctrl_shift_shortcuts_match_case_insensitively() {
+        assert!(shortcut_key(
+            &Key::Character("V".into()),
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            'v'
+        ));
     }
 }

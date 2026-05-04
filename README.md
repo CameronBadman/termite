@@ -36,6 +36,9 @@ cargo run --release -p c_term_app
 Exit the shell normally with `exit` or Ctrl-D. Ctrl-Q is also handled as an
 emergency quit.
 
+Mouse drag selects visible text. Ctrl-Shift-C copies the selection, and
+Ctrl-Shift-V pastes through the Wayland clipboard.
+
 ## Compiled Config
 
 Configuration is Rust code in `crates/c_term_app/src/config.rs`.

@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    io::Write,
+    io::{Read, Write},
     os::fd::AsRawFd,
     sync::Arc,
     time::{Duration, Instant},
@@ -15,6 +15,7 @@ use winit::{
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
 };
+use wl_clipboard_rs::{copy as wl_copy, paste as wl_paste};
 
 use crate::{PtyChild, set_pty_winsize, spawn_shell};
 use crate::{
@@ -27,15 +28,17 @@ mod gpu;
 mod input;
 mod pty_events;
 mod render_cache;
+mod selection;
 mod text;
 
 use gpu::GpuRenderer;
 use input::{
     active_mouse_button, encode_mouse_event, encode_window_key, mouse_button_code, mouse_cell,
-    wheel_codes, wheel_scroll_lines,
+    shortcut_key, wheel_codes, wheel_scroll_lines,
 };
 use pty_events::{UserEvent, spawn_pty_reader};
 use render_cache::RenderCache;
+use selection::Selection;
 
 pub(crate) const CELL_WIDTH: u32 = 8;
 pub(crate) const CELL_HEIGHT: u32 = 16;
@@ -70,6 +73,7 @@ struct WindowBackend {
     rows: u16,
     theme: Theme,
     render_cache: RenderCache,
+    selection: Option<Selection>,
     mouse_buttons: u8,
     mouse_position: Option<(u16, u16)>,
     animation_deadline: Option<Instant>,
@@ -103,6 +107,7 @@ impl WindowBackend {
             rows: 1,
             theme,
             render_cache: RenderCache::new(font, theme),
+            selection: None,
             mouse_buttons: 0,
             mouse_position: None,
             animation_deadline: None,
@@ -259,6 +264,7 @@ impl WindowBackend {
             return;
         }
 
+        self.selection = None;
         if let Some(child) = &mut self.child
             && let Err(error) = set_pty_winsize(child.master.as_raw_fd(), cols, rows)
         {
@@ -301,6 +307,7 @@ impl WindowBackend {
             return false;
         }
         self.scroll_offset = next;
+        self.selection = None;
         self.mark_dirty();
         true
     }
@@ -310,12 +317,22 @@ impl WindowBackend {
             return;
         }
         self.scroll_offset = 0;
+        self.selection = None;
         self.render_cache.invalidate();
         self.mark_dirty();
     }
 
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, event: KeyEvent) {
         if event.state != ElementState::Pressed {
+            return;
+        }
+
+        if shortcut_key(&event.logical_key, self.modifiers, 'c') {
+            self.copy_selection();
+            return;
+        }
+        if shortcut_key(&event.logical_key, self.modifiers, 'v') {
+            self.paste_clipboard();
             return;
         }
 
@@ -345,6 +362,7 @@ impl WindowBackend {
             return;
         };
 
+        self.selection = None;
         self.snap_to_live();
         if let Some(child) = &mut self.child
             && let Err(error) = child.master.write_all(&bytes)
@@ -364,6 +382,19 @@ impl WindowBackend {
         match state {
             ElementState::Pressed => self.mouse_buttons |= 1 << button_code,
             ElementState::Released => self.mouse_buttons &= !(1 << button_code),
+        }
+
+        if button == MouseButton::Left && self.selection_mouse_mode() {
+            match state {
+                ElementState::Pressed => self.selection = Some(Selection::start(cell)),
+                ElementState::Released => {
+                    if let Some(selection) = &mut self.selection {
+                        selection.finish();
+                    }
+                }
+            }
+            self.mark_dirty();
+            return;
         }
 
         let Some(terminal) = &self.terminal else {
@@ -391,6 +422,15 @@ impl WindowBackend {
             return;
         }
         self.mouse_position = Some(cell);
+
+        if let Some(selection) = &mut self.selection
+            && selection.is_dragging()
+        {
+            if selection.update(cell) {
+                self.mark_dirty();
+            }
+            return;
+        }
 
         let Some(terminal) = &self.terminal else {
             return;
@@ -438,6 +478,76 @@ impl WindowBackend {
         }
     }
 
+    fn selection_mouse_mode(&self) -> bool {
+        self.modifiers.shift_key()
+            || self
+                .terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.mouse().tracking == MouseTracking::None)
+    }
+
+    fn copy_selection(&self) {
+        let (Some(selection), Some(terminal)) = (self.selection, &self.terminal) else {
+            return;
+        };
+        let text = selection.text(terminal, self.scroll_offset);
+        if text.is_empty() {
+            return;
+        }
+        let source = wl_copy::Source::Bytes(text.into_bytes().into_boxed_slice());
+        if let Err(error) = wl_copy::Options::new().copy(source, wl_copy::MimeType::Text) {
+            eprintln!("c-term: failed to copy selection: {error}");
+        }
+    }
+
+    fn paste_clipboard(&mut self) {
+        let (mut pipe, _) = match wl_paste::get_contents(
+            wl_paste::ClipboardType::Regular,
+            wl_paste::Seat::Unspecified,
+            wl_paste::MimeType::Text,
+        ) {
+            Ok(contents) => contents,
+            Err(
+                wl_paste::Error::NoSeats
+                | wl_paste::Error::ClipboardEmpty
+                | wl_paste::Error::NoMimeType,
+            ) => return,
+            Err(error) => {
+                eprintln!("c-term: failed to read clipboard: {error}");
+                return;
+            }
+        };
+        let mut text = String::new();
+        if let Err(error) = pipe.read_to_string(&mut text) {
+            eprintln!("c-term: failed to read clipboard text: {error}");
+            return;
+        }
+        self.write_paste(&text);
+    }
+
+    fn write_paste(&mut self, text: &str) {
+        let bracketed = self
+            .terminal
+            .as_ref()
+            .is_some_and(TerminalCore::bracketed_paste);
+        let mut bytes = Vec::with_capacity(text.len() + if bracketed { 12 } else { 0 });
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[200~");
+        }
+        bytes.extend(text.bytes().filter(|byte| *byte != 0));
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[201~");
+        }
+
+        self.selection = None;
+        self.snap_to_live();
+        if let Some(child) = &mut self.child
+            && let Err(error) = child.master.write_all(&bytes)
+        {
+            eprintln!("c-term: failed to paste clipboard text to PTY: {error}");
+        }
+    }
+
     fn render(&mut self) {
         self.redraw_pending = false;
         self.frame_deadline = None;
@@ -460,7 +570,7 @@ impl WindowBackend {
             return;
         };
 
-        let (plugin_active, overlays, screen_opacity) = if !viewing_history {
+        let (plugin_active, mut overlays, screen_opacity) = if !viewing_history {
             let mut plugin_frame = PluginFrame {
                 grid: terminal.grid(),
                 now: render_started,
@@ -473,6 +583,9 @@ impl WindowBackend {
         } else {
             (false, Vec::new(), 1.0)
         };
+        if let Some(selection) = self.selection {
+            overlays.extend(selection.overlays(self.cols, self.theme.ansi[4]));
+        }
         let cursor = if viewing_history {
             [0.0, 0.0, 0.0, 0.0]
         } else {

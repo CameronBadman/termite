@@ -58,6 +58,7 @@ pub enum TerminalMode {
     CursorVisible,
     MouseTracking(MouseTracking),
     SgrMouse,
+    BracketedPaste,
     SynchronizedUpdate,
     Wrap,
 }
@@ -408,6 +409,7 @@ impl ActionPerformer<'_> {
                 1002 => TerminalMode::MouseTracking(MouseTracking::Drag),
                 1003 => TerminalMode::MouseTracking(MouseTracking::Any),
                 1006 => TerminalMode::SgrMouse,
+                2004 => TerminalMode::BracketedPaste,
                 2026 => TerminalMode::SynchronizedUpdate,
                 47 | 1047 | 1049 => TerminalMode::AlternateScreen,
                 _ => continue,

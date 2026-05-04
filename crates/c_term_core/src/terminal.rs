@@ -36,6 +36,7 @@ pub struct TerminalCore<P = SimpleParser> {
     saved_cursor: Option<Cursor>,
     last_printed: char,
     mouse: MouseState,
+    bracketed_paste: bool,
     output: Vec<u8>,
 }
 
@@ -60,6 +61,7 @@ where
             saved_cursor: None,
             last_printed: ' ',
             mouse: MouseState::default(),
+            bracketed_paste: false,
             output: Vec::new(),
         }
     }
@@ -70,6 +72,10 @@ where
 
     pub fn mouse(&self) -> MouseState {
         self.mouse
+    }
+
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
     }
 
     pub fn is_alternate_screen(&self) -> bool {
@@ -218,6 +224,7 @@ where
                 };
             }
             TerminalMode::SgrMouse => self.mouse.sgr = enabled,
+            TerminalMode::BracketedPaste => self.bracketed_paste = enabled,
             TerminalMode::SynchronizedUpdate => self.grid.set_synchronized(enabled),
             TerminalMode::Wrap => self.grid.set_wrap(enabled),
         }
@@ -233,6 +240,7 @@ where
         self.saved_cursor = None;
         self.last_printed = ' ';
         self.mouse = MouseState::default();
+        self.bracketed_paste = false;
     }
 
     fn report_mode(&mut self, mode: u16) {
@@ -625,6 +633,17 @@ mod tests {
 
         let _ = terminal.process_pty_input(b"\x1b[?1006l");
         assert!(!terminal.mouse().sgr);
+    }
+
+    #[test]
+    fn bracketed_paste_mode_is_tracked() {
+        let mut terminal = TerminalCore::new(2, 1);
+
+        let _ = terminal.process_pty_input(b"\x1b[?2004h");
+        assert!(terminal.bracketed_paste());
+
+        let _ = terminal.process_pty_input(b"\x1b[?2004l");
+        assert!(!terminal.bracketed_paste());
     }
 
     #[test]
