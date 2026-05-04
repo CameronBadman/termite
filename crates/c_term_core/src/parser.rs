@@ -272,11 +272,10 @@ impl vte::Perform for ActionPerformer<'_> {
             ));
         }
         if let [b"52", clipboard, base64] = params
-            && let Some(clipboard) = clipboard.first()
             && base64 != b"?"
         {
             self.actions.push(ParserAction::ClipboardStore {
-                clipboard: *clipboard,
+                clipboard: clipboard.first().copied().unwrap_or(b'c'),
                 base64: base64.to_vec(),
             });
         }

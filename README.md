@@ -41,6 +41,13 @@ Ctrl-Shift-V pastes through the Wayland clipboard. OSC 52 clipboard writes are
 also supported, so tmux copy mode can copy out when tmux `set-clipboard` is
 enabled.
 
+For tmux with Termite's current `TERM=xterm-256color`, add:
+
+```tmux
+set -g set-clipboard on
+set -as terminal-features ',xterm-256color:clipboard'
+```
+
 ## Compiled Config
 
 Configuration is Rust code in `crates/c_term_app/src/config.rs`.

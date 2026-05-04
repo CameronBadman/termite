@@ -694,6 +694,15 @@ mod tests {
     }
 
     #[test]
+    fn osc52_empty_selection_defaults_to_clipboard() {
+        let mut terminal = TerminalCore::new(2, 1);
+        let tick = terminal.process_pty_input(b"\x1b]52;;aGVsbG8=\x07");
+
+        assert_eq!(tick.clipboard[0].clipboard, b'c');
+        assert_eq!(tick.clipboard[0].base64, b"aGVsbG8=");
+    }
+
+    #[test]
     fn dec_special_graphics_map_tmux_line_drawing() {
         let mut terminal = TerminalCore::new(8, 1);
         let _ = terminal.process_pty_input(b"\x1b(0lqkxmj\x1b(Bq");
