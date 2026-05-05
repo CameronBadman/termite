@@ -2,6 +2,7 @@
 pub enum ParserAction {
     Print(char),
     PrintAscii(Vec<u8>),
+    PrintText(String),
     Tab,
     LineFeed,
     NextLine,
@@ -102,9 +103,10 @@ impl ParserAdapter for SimpleParser {
             g1_line_drawing: &mut self.g1_line_drawing,
             use_g1: &mut self.use_g1,
             ascii_run: Vec::new(),
+            print_run: String::new(),
         };
         self.parser.advance(&mut performer, input);
-        performer.flush_ascii_run();
+        performer.flush_print_run();
     }
 
     fn can_process_ascii_fast_path(&self) -> bool {
@@ -118,15 +120,40 @@ struct ActionPerformer<'a> {
     g1_line_drawing: &'a mut bool,
     use_g1: &'a mut bool,
     ascii_run: Vec<u8>,
+    print_run: String,
 }
 
 impl ActionPerformer<'_> {
-    fn flush_ascii_run(&mut self) {
+    fn flush_print_run(&mut self) {
         if !self.ascii_run.is_empty() {
-            self.actions.push(ParserAction::PrintAscii(std::mem::take(
-                &mut self.ascii_run,
-            )));
+            if self.print_run.is_empty() {
+                self.actions.push(ParserAction::PrintAscii(std::mem::take(
+                    &mut self.ascii_run,
+                )));
+                return;
+            }
+            self.print_run
+                .push_str(std::str::from_utf8(&self.ascii_run).expect("ASCII print run"));
+            self.ascii_run.clear();
         }
+        if !self.print_run.is_empty() {
+            self.actions
+                .push(ParserAction::PrintText(std::mem::take(&mut self.print_run)));
+        }
+    }
+
+    fn push_print_char(&mut self, ch: char) {
+        if ch.is_ascii() && (ch.is_ascii_graphic() || ch == ' ') {
+            self.ascii_run.push(ch as u8);
+            return;
+        }
+
+        if !self.ascii_run.is_empty() {
+            self.print_run
+                .push_str(std::str::from_utf8(&self.ascii_run).expect("ASCII print run"));
+            self.ascii_run.clear();
+        }
+        self.print_run.push(ch);
     }
 }
 
@@ -137,17 +164,17 @@ impl vte::Perform for ActionPerformer<'_> {
         } else {
             *self.g0_line_drawing
         };
-        if !line_drawing && ch.is_ascii() && (ch.is_ascii_graphic() || ch == ' ') {
-            self.ascii_run.push(ch as u8);
+        if !line_drawing {
+            self.push_print_char(ch);
         } else {
-            self.flush_ascii_run();
+            self.flush_print_run();
             self.actions
                 .push(ParserAction::Print(map_printed_char(ch, line_drawing)));
         }
     }
 
     fn execute(&mut self, byte: u8) {
-        self.flush_ascii_run();
+        self.flush_print_run();
         match byte {
             b'\n' | 0x0b | 0x0c => self.actions.push(ParserAction::LineFeed),
             b'\r' => self.actions.push(ParserAction::CarriageReturn),
@@ -166,7 +193,7 @@ impl vte::Perform for ActionPerformer<'_> {
         ignore: bool,
         action: char,
     ) {
-        self.flush_ascii_run();
+        self.flush_print_run();
         if ignore {
             return;
         }
@@ -282,7 +309,7 @@ impl vte::Perform for ActionPerformer<'_> {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
-        self.flush_ascii_run();
+        self.flush_print_run();
         if ignore {
             return;
         }
@@ -309,7 +336,7 @@ impl vte::Perform for ActionPerformer<'_> {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        self.flush_ascii_run();
+        self.flush_print_run();
         if matches!(params, [b"11", b"?"]) {
             self.actions.push(ParserAction::Respond(
                 crate::DEFAULT_BACKGROUND_REPLY.to_vec(),

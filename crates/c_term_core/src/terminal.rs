@@ -203,6 +203,7 @@ where
                     self.last_printed = char::from(last);
                 }
             }
+            ParserAction::PrintText(text) => self.process_print_text(&text),
             ParserAction::Repeat(count) => {
                 for _ in 0..count {
                     let _ = self.grid.put_char(self.last_printed, self.style);
@@ -264,6 +265,29 @@ where
             ParserAction::ReportMode(mode) => self.report_mode(mode),
             ParserAction::Respond(bytes) => self.output.extend(bytes),
             ParserAction::ResetStyle => self.style = Style::default(),
+        }
+    }
+
+    fn process_print_text(&mut self, text: &str) {
+        let mut index = 0;
+        while index < text.len() {
+            let bytes = text.as_bytes();
+            if bytes[index].is_ascii_graphic() || bytes[index] == b' ' {
+                let start = index;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_graphic() || bytes[index] == b' ')
+                {
+                    index += 1;
+                }
+                self.grid.put_ascii_run(&bytes[start..index], self.style);
+                self.last_printed = char::from(bytes[index - 1]);
+                continue;
+            }
+
+            let ch = text[index..].chars().next().expect("valid char boundary");
+            let _ = self.grid.put_char(ch, self.style);
+            self.last_printed = ch;
+            index += ch.len_utf8();
         }
     }
 
