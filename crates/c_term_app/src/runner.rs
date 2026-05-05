@@ -9,15 +9,40 @@ pub(crate) enum FontConfig {
     #[default]
     Bitmap8x8,
     GlyphAtlas {
-        path: String,
+        paths: Vec<String>,
         size: f32,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalMetrics {
+    pub(crate) cell_width: u32,
+    pub(crate) cell_height: u32,
+}
+
+impl Default for TerminalMetrics {
+    fn default() -> Self {
+        Self {
+            cell_width: 10,
+            cell_height: 18,
+        }
+    }
+}
+
+impl TerminalMetrics {
+    fn normalized(self) -> Self {
+        Self {
+            cell_width: self.cell_width.max(1),
+            cell_height: self.cell_height.max(1),
+        }
+    }
 }
 
 pub(crate) struct Runner {
     shell: String,
     plugins: PluginHost,
     font: FontConfig,
+    metrics: TerminalMetrics,
     theme: Theme,
 }
 
@@ -27,6 +52,7 @@ impl Runner {
             shell: env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned()),
             plugins: PluginHost::new(),
             font: FontConfig::default(),
+            metrics: TerminalMetrics::default(),
             theme: Theme::default(),
         }
     }
@@ -40,8 +66,14 @@ impl Runner {
         window_backend::run(self)
     }
 
-    pub(crate) fn into_parts(self) -> (String, PluginHost, FontConfig, Theme) {
-        (self.shell, self.plugins, self.font, self.theme)
+    pub(crate) fn into_parts(self) -> (String, PluginHost, FontConfig, TerminalMetrics, Theme) {
+        (
+            self.shell,
+            self.plugins,
+            self.font,
+            self.metrics,
+            self.theme,
+        )
     }
 
     fn add_plugin(&mut self, plugin: impl crate::plugins::Plugin + 'static) {
@@ -50,6 +82,10 @@ impl Runner {
 
     fn set_font(&mut self, font: FontConfig) {
         self.font = font;
+    }
+
+    fn set_metrics(&mut self, metrics: TerminalMetrics) {
+        self.metrics = metrics.normalized();
     }
 
     fn set_theme(&mut self, theme: Theme) {
@@ -64,6 +100,11 @@ impl Runner {
     #[cfg(test)]
     pub(crate) fn font(&self) -> &FontConfig {
         &self.font
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metrics(&self) -> TerminalMetrics {
+        self.metrics
     }
 
     #[cfg(test)]
@@ -89,13 +130,27 @@ pub(crate) fn bitmap_font() -> FontPart {
     FontPart(FontConfig::Bitmap8x8)
 }
 
+#[allow(dead_code)]
 pub(crate) fn font_file(path: impl Into<String>) -> FontPart {
     font_file_with_size(path, 14.0)
 }
 
+#[allow(dead_code)]
 pub(crate) fn font_file_with_size(path: impl Into<String>, size: f32) -> FontPart {
+    font_files_with_size([path], size)
+}
+
+#[allow(dead_code)]
+pub(crate) fn font_files(paths: impl IntoIterator<Item = impl Into<String>>) -> FontPart {
+    font_files_with_size(paths, 14.0)
+}
+
+pub(crate) fn font_files_with_size(
+    paths: impl IntoIterator<Item = impl Into<String>>,
+    size: f32,
+) -> FontPart {
     FontPart(FontConfig::GlyphAtlas {
-        path: path.into(),
+        paths: paths.into_iter().map(Into::into).collect(),
         size,
     })
 }
@@ -105,6 +160,18 @@ pub(crate) struct FontPart(FontConfig);
 impl RunnerPart for FontPart {
     fn install(self, runner: &mut Runner) {
         runner.set_font(self.0);
+    }
+}
+
+pub(crate) fn terminal_metrics(metrics: TerminalMetrics) -> MetricsPart {
+    MetricsPart(metrics)
+}
+
+pub(crate) struct MetricsPart(TerminalMetrics);
+
+impl RunnerPart for MetricsPart {
+    fn install(self, runner: &mut Runner) {
+        runner.set_metrics(self.0);
     }
 }
 

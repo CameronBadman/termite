@@ -128,6 +128,7 @@ This is closer to dwm-style compiled configuration than runtime config files.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Compiled Config And Plugins](docs/CONFIG_AND_PLUGINS.md)
 - [Terminal Identity And Clipboard](docs/TERMINAL_IDENTITY.md)
+- [Performance](docs/PERFORMANCE.md)
 
 ## Terminfo
 

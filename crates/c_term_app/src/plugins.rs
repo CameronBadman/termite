@@ -2,10 +2,7 @@ use std::time::Instant;
 
 use c_term_core::Grid;
 
-use crate::{
-    theme::Theme,
-    window_backend::{CELL_HEIGHT, CELL_WIDTH},
-};
+use crate::{runner::TerminalMetrics, theme::Theme};
 
 type Point = (f32, f32);
 
@@ -35,6 +32,7 @@ pub(crate) struct PluginFrame<'a> {
     pub(crate) grid: &'a Grid,
     pub(crate) now: Instant,
     pub(crate) theme: &'a Theme,
+    pub(crate) metrics: TerminalMetrics,
     pub(crate) overlays: Vec<OverlayCommand>,
     pub(crate) screen_opacity: f32,
 }
@@ -46,10 +44,10 @@ impl PluginFrame<'_> {
 
     pub(crate) fn overlay_cell(&mut self, x: u16, y: u16, color: [u8; 3], alpha: u8) {
         self.push_rect(
-            usize::from(x) * cell_width(),
-            usize::from(y) * cell_height(),
-            cell_width(),
-            cell_height(),
+            usize::from(x) * self.cell_width(),
+            usize::from(y) * self.cell_height(),
+            self.cell_width(),
+            self.cell_height(),
             color,
             alpha,
         );
@@ -76,9 +74,9 @@ impl PluginFrame<'_> {
     pub(crate) fn overlay_row(&mut self, y: u16, color: [u8; 3], alpha: u8) {
         self.push_rect(
             0,
-            usize::from(y) * cell_height(),
-            usize::from(self.grid.width()) * cell_width(),
-            cell_height(),
+            usize::from(y) * self.cell_height(),
+            usize::from(self.grid.width()) * self.cell_width(),
+            self.cell_height(),
             color,
             alpha,
         );
@@ -103,6 +101,14 @@ impl PluginFrame<'_> {
             alpha,
             corners: [(right, top), (right, bottom), (left, bottom), (left, top)],
         });
+    }
+
+    fn cell_width(&self) -> usize {
+        self.metrics.cell_width as usize
+    }
+
+    fn cell_height(&self) -> usize {
+        self.metrics.cell_height as usize
     }
 }
 
@@ -139,14 +145,6 @@ impl PluginHost {
     }
 }
 
-fn cell_width() -> usize {
-    CELL_WIDTH as usize
-}
-
-fn cell_height() -> usize {
-    CELL_HEIGHT as usize
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +159,7 @@ mod tests {
             grid: terminal.grid(),
             now,
             theme,
+            metrics: TerminalMetrics::default(),
             overlays: Vec::new(),
             screen_opacity: 1.0,
         }

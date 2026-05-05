@@ -72,6 +72,7 @@ pub struct Grid {
     width: u16,
     height: u16,
     cells: Vec<Cell>,
+    row_offset: usize,
     cursor: Cursor,
     synchronized: bool,
     scroll_top: u16,
@@ -92,6 +93,7 @@ impl Grid {
             width,
             height,
             cells: vec![Cell::default(); len],
+            row_offset: 0,
             cursor: Cursor {
                 x: 0,
                 y: 0,
@@ -133,6 +135,7 @@ impl Grid {
         self.index(x, y).map(|index| self.cells[index])
     }
 
+    #[allow(dead_code)]
     pub fn visible_cells(&self) -> &[Cell] {
         &self.cells
     }
@@ -141,7 +144,7 @@ impl Grid {
         if y >= self.height {
             return None;
         }
-        let start = usize::from(y) * usize::from(self.width);
+        let start = self.row_start(y);
         let end = start + usize::from(self.width);
         Some(&self.cells[start..end])
     }
@@ -219,6 +222,44 @@ impl Grid {
         }
         self.advance_cursor(width);
         Some((x, y, cell))
+    }
+
+    pub fn put_ascii_run(&mut self, bytes: &[u8], style: Style) {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            self.print_linewrap();
+
+            let x = self.cursor.x;
+            let y = self.cursor.y;
+            let available = usize::from(self.width.saturating_sub(x)).max(1);
+            let count = available.min(bytes.len() - offset);
+            if self.row_range_has_wide_state(y, x, count as u16) {
+                let _ = self.put_char(char::from(bytes[offset]), style);
+                offset += 1;
+                continue;
+            }
+
+            let Some(start) = self.index(x, y) else {
+                return;
+            };
+            let row = &mut self.cells[start..start + count];
+            let mut changed = false;
+            for (cell, byte) in row.iter_mut().zip(&bytes[offset..offset + count]) {
+                let next = Cell {
+                    ch: char::from(*byte),
+                    style,
+                    wide: false,
+                    spacer: false,
+                };
+                changed |= *cell != next;
+                *cell = next;
+            }
+            if changed {
+                self.mark_line_damage(y, x, count as u16);
+            }
+            self.advance_cursor(count as u16);
+            offset += count;
+        }
     }
 
     pub fn put_tab(&mut self, style: Style) {
@@ -312,24 +353,41 @@ impl Grid {
     }
 
     pub fn clear_screen(&mut self, mode: EraseMode) {
-        let range = match mode {
-            EraseMode::All => 0..self.cells.len(),
+        let mut changed = false;
+        match mode {
+            EraseMode::All => {
+                changed = self.cells.iter().any(|cell| *cell != Cell::default());
+                self.cells.fill(Cell::default());
+            }
             EraseMode::FromCursor => {
-                self.index(self.cursor.x, self.cursor.y).unwrap_or(0)..self.cells.len()
+                changed |= self.clear_cells(
+                    self.index(self.cursor.x, self.cursor.y).unwrap_or(0)
+                        ..self.row_start(self.cursor.y) + usize::from(self.width),
+                );
+                for y in self.cursor.y.saturating_add(1)..self.height {
+                    let row_start = self.row_start(y);
+                    changed |= self.clear_cells(row_start..row_start + usize::from(self.width));
+                }
             }
             EraseMode::ToCursor => {
-                let end = self.index(self.cursor.x, self.cursor.y).unwrap_or(0) + 1;
-                0..end
+                for y in 0..self.cursor.y {
+                    let row_start = self.row_start(y);
+                    changed |= self.clear_cells(row_start..row_start + usize::from(self.width));
+                }
+                changed |= self.clear_cells(
+                    self.row_start(self.cursor.y)
+                        ..self.index(self.cursor.x, self.cursor.y).unwrap_or(0) + 1,
+                );
             }
-        };
-        if self.clear_cells(range) {
+        }
+        if changed {
             self.generation += 1;
             self.damage.mark(DamageRegion::Viewport);
         }
     }
 
     pub fn clear_line(&mut self, mode: EraseMode) {
-        let row_start = usize::from(self.cursor.y) * usize::from(self.width);
+        let row_start = self.row_start(self.cursor.y);
         let row_end = row_start + usize::from(self.width);
         let cursor = self
             .index(self.cursor.x, self.cursor.y)
@@ -385,24 +443,90 @@ impl Grid {
             return false;
         }
 
-        let old_width = self.width;
         let old_height = self.height;
         let mut cells = vec![Cell::default(); usize::from(width) * usize::from(height)];
-        let copy_width = old_width.min(width);
+        let copy_width = self.width.min(width);
         let copy_height = old_height.min(height);
         for y in 0..copy_height {
-            let old_start = usize::from(y) * usize::from(old_width);
             let new_start = usize::from(y) * usize::from(width);
             let len = usize::from(copy_width);
-            cells[new_start..new_start + len]
-                .copy_from_slice(&self.cells[old_start..old_start + len]);
+            if let Some(row) = self.row(y) {
+                cells[new_start..new_start + len].copy_from_slice(&row[..len]);
+            }
         }
 
         self.width = width;
         self.height = height;
         self.cells = cells;
+        self.row_offset = 0;
         self.cursor.x = self.cursor.x.min(self.width - 1);
         self.cursor.y = self.cursor.y.min(self.height - 1);
+        self.pending_wrap = false;
+        self.reset_scroll_region();
+        for y in 0..self.height {
+            let _ = self.sanitize_row(y);
+        }
+        self.generation += 1;
+        self.damage.mark(DamageRegion::Viewport);
+        true
+    }
+
+    pub fn resize_reflow(&mut self, width: u16, height: u16) -> bool {
+        let width = width.max(1);
+        let height = height.max(1);
+        if width == self.width && height == self.height {
+            return false;
+        }
+
+        let old_width = self.width;
+        let old_height = self.height;
+        let old_cells = self.logical_cells();
+        let old_cursor = self.cursor;
+        let mut rows = Vec::new();
+        let mut cursor_row = 0usize;
+        let mut cursor_x = 0u16;
+
+        let row_limit = reflow_row_limit(&old_cells, old_width, old_height, old_cursor.y);
+        for y in 0..row_limit {
+            let row_start = usize::from(y) * usize::from(old_width);
+            let row = &old_cells[row_start..row_start + usize::from(old_width)];
+            let line_start = rows.len();
+            let cursor = (y == old_cursor.y).then_some(old_cursor.x);
+            let line_cursor = append_reflowed_row(row, width, &mut rows, cursor);
+            if let Some((line_cursor_row, line_cursor_x)) = line_cursor {
+                cursor_row = line_start + line_cursor_row;
+                cursor_x = line_cursor_x;
+            }
+        }
+
+        if rows.is_empty() {
+            rows.push(blank_row(width));
+        }
+
+        let visible_height = usize::from(height);
+        let scroll_count = rows.len().saturating_sub(visible_height);
+        if scroll_count > 0 {
+            self.scrolled_rows
+                .extend(rows[..scroll_count].iter().cloned());
+        }
+
+        self.width = width;
+        self.height = height;
+        self.cells = rows[scroll_count..]
+            .iter()
+            .take(visible_height)
+            .flatten()
+            .copied()
+            .collect();
+        while self.cells.len() < usize::from(width) * visible_height {
+            self.cells.extend(blank_row(width));
+        }
+        self.row_offset = 0;
+
+        self.cursor.x = cursor_x.min(self.width - 1);
+        self.cursor.y = cursor_row
+            .saturating_sub(scroll_count)
+            .min(visible_height.saturating_sub(1)) as u16;
         self.pending_wrap = false;
         self.reset_scroll_region();
         for y in 0..self.height {
@@ -428,17 +552,35 @@ impl Grid {
 
     fn index(&self, x: u16, y: u16) -> Option<usize> {
         if x < self.width && y < self.height {
-            Some(usize::from(y) * usize::from(self.width) + usize::from(x))
+            Some(self.row_start(y) + usize::from(x))
         } else {
             None
         }
+    }
+
+    fn row_start(&self, y: u16) -> usize {
+        self.physical_row(y) * usize::from(self.width)
+    }
+
+    fn physical_row(&self, y: u16) -> usize {
+        (self.row_offset + usize::from(y)) % usize::from(self.height.max(1))
+    }
+
+    fn logical_cells(&self) -> Vec<Cell> {
+        let mut cells = Vec::with_capacity(self.cells.len());
+        for y in 0..self.height {
+            if let Some(row) = self.row(y) {
+                cells.extend_from_slice(row);
+            }
+        }
+        cells
     }
 
     fn fill_line_range(&mut self, y: u16, x_start: u16, x_end: u16) {
         if y >= self.height || x_start >= x_end {
             return;
         }
-        let row_start = usize::from(y) * usize::from(self.width);
+        let row_start = self.row_start(y);
         let start = row_start + usize::from(x_start);
         let end = row_start + usize::from(x_end.min(self.width));
         if self.clear_cells(start..end) {
@@ -460,7 +602,7 @@ impl Grid {
             return;
         }
 
-        let row_start = usize::from(self.cursor.y) * usize::from(self.width);
+        let row_start = self.row_start(self.cursor.y);
         let x = usize::from(self.cursor.x);
         let width = usize::from(self.width);
         let count = usize::from(count.min(self.width - self.cursor.x));
@@ -494,25 +636,54 @@ impl Grid {
 
         let width = usize::from(self.width);
         let count = usize::from(count.min(bottom - top + 1));
-        let start = usize::from(top) * width;
-        let end = (usize::from(bottom) + 1) * width;
-        let count_cells = count * width;
-
         if !down && top == 0 && bottom == self.height.saturating_sub(1) {
-            for row in 0..count {
-                let row_start = start + row * width;
+            let height = usize::from(self.height);
+            for row in 0..count.min(height) {
+                let row_start = self.row_start(row as u16);
                 self.scrolled_rows
                     .push(self.cells[row_start..row_start + width].to_vec());
             }
+            self.row_offset = (self.row_offset + count) % height.max(1);
+            for row in height.saturating_sub(count)..height {
+                let row_start = self.row_start(row as u16);
+                self.cells[row_start..row_start + width].fill(Cell::default());
+            }
+            self.generation += 1;
+            self.damage.mark(DamageRegion::Scroll {
+                top,
+                bottom,
+                count: count as u16,
+                down,
+            });
+            return;
         }
 
+        let mut rows: Vec<Vec<Cell>> = (top..=bottom)
+            .map(|y| {
+                let row_start = self.row_start(y);
+                self.cells[row_start..row_start + width].to_vec()
+            })
+            .collect();
         if down {
-            self.cells
-                .copy_within(start..end - count_cells, start + count_cells);
-            self.cells[start..start + count_cells].fill(Cell::default());
+            for y in (0..rows.len()).rev() {
+                rows[y] = if y >= count {
+                    rows[y - count].clone()
+                } else {
+                    blank_row(self.width)
+                };
+            }
         } else {
-            self.cells.copy_within(start + count_cells..end, start);
-            self.cells[end - count_cells..end].fill(Cell::default());
+            for y in 0..rows.len() {
+                rows[y] = if y + count < rows.len() {
+                    rows[y + count].clone()
+                } else {
+                    blank_row(self.width)
+                };
+            }
+        }
+        for (index, y) in (top..=bottom).enumerate() {
+            let row_start = self.row_start(y);
+            self.cells[row_start..row_start + width].copy_from_slice(&rows[index]);
         }
 
         self.generation += 1;
@@ -650,6 +821,24 @@ impl Grid {
         (start, end, changed)
     }
 
+    fn row_range_has_wide_state(&self, y: u16, x: u16, width: u16) -> bool {
+        if y >= self.height || width == 0 {
+            return false;
+        }
+        let row_start = self.row_start(y);
+        let start = usize::from(x);
+        let end = start
+            .saturating_add(usize::from(width))
+            .min(usize::from(self.width));
+        if start > 0 && self.cells[row_start + start].spacer {
+            return true;
+        }
+        self.cells[row_start + start..row_start + end]
+            .iter()
+            .any(|cell| cell.wide || cell.spacer)
+            || (end < usize::from(self.width) && self.cells[row_start + end].spacer)
+    }
+
     fn expand_clear_range(&self, range: Range<usize>) -> Range<usize> {
         if range.is_empty() || self.width == 0 {
             return range;
@@ -674,7 +863,7 @@ impl Grid {
             return false;
         }
 
-        let row_start = usize::from(y) * usize::from(self.width);
+        let row_start = self.row_start(y);
         let mut changed = false;
         for x in 0..usize::from(self.width) {
             let index = row_start + x;
@@ -715,4 +904,101 @@ fn clamp_add(value: u16, delta: i16, limit: u16) -> u16 {
 
 fn char_width(ch: char) -> u16 {
     UnicodeWidthChar::width(ch).unwrap_or(0).min(2) as u16
+}
+
+fn blank_row(width: u16) -> Vec<Cell> {
+    vec![Cell::default(); usize::from(width)]
+}
+
+fn append_reflowed_row(
+    row: &[Cell],
+    width: u16,
+    rows: &mut Vec<Vec<Cell>>,
+    cursor_x: Option<u16>,
+) -> Option<(usize, u16)> {
+    let width_usize = usize::from(width);
+    let end = logical_row_end(row);
+    let cursor = cursor_x.map(|x| cursor_position_for_row(row, end, x, width));
+    let mut current = blank_row(width);
+    let mut x = 0usize;
+
+    if end == 0 {
+        rows.push(current);
+        return cursor.or(Some((0, 0))).filter(|_| cursor_x.is_some());
+    }
+
+    for cell in row.iter().take(end).copied() {
+        if cell.spacer {
+            continue;
+        }
+        let cell_width = reflow_cell_width(cell, width);
+        if x + usize::from(cell_width) > width_usize && x > 0 {
+            rows.push(current);
+            current = blank_row(width);
+            x = 0;
+        }
+
+        current[x] = Cell {
+            wide: cell_width > 1,
+            spacer: false,
+            ..cell
+        };
+        if cell_width > 1 && x + 1 < width_usize {
+            current[x + 1] = Cell {
+                ch: ' ',
+                style: cell.style,
+                wide: false,
+                spacer: true,
+            };
+        }
+        x += usize::from(cell_width);
+    }
+    rows.push(current);
+    cursor
+}
+
+fn logical_row_end(row: &[Cell]) -> usize {
+    row.iter()
+        .rposition(|cell| *cell != Cell::default())
+        .map_or(0, |index| index + 1)
+}
+
+fn reflow_row_limit(cells: &[Cell], width: u16, height: u16, cursor_y: u16) -> u16 {
+    let width = usize::from(width);
+    let last_nonblank = (0..height).rev().find(|y| {
+        let start = usize::from(*y) * width;
+        logical_row_end(&cells[start..start + width]) > 0
+    });
+    last_nonblank
+        .unwrap_or(0)
+        .max(cursor_y)
+        .saturating_add(1)
+        .min(height)
+}
+
+fn cursor_position_for_row(row: &[Cell], end: usize, cursor_x: u16, width: u16) -> (usize, u16) {
+    let columns = row
+        .iter()
+        .take(end.min(usize::from(cursor_x)))
+        .filter(|cell| !cell.spacer)
+        .map(|cell| usize::from(reflow_cell_width(*cell, width)))
+        .sum::<usize>();
+    if columns == 0 {
+        return (0, 0);
+    }
+
+    let width = usize::from(width);
+    if columns.is_multiple_of(width) {
+        (columns / width - 1, (width - 1) as u16)
+    } else {
+        (columns / width, (columns % width) as u16)
+    }
+}
+
+fn reflow_cell_width(cell: Cell, grid_width: u16) -> u16 {
+    if grid_width > 1 {
+        char_width(cell.ch).max(1)
+    } else {
+        1
+    }
 }

@@ -1,23 +1,38 @@
 use crate::{
     plugins::{CursorLine, CursorLineConfig, CursorTrail, CursorTrailColor, CursorTrailConfig},
     plugins::{ScreenOpacity, ScreenOpacityConfig},
-    runner::{Runner, RunnerPart, bitmap_font, font_file, parts, theme},
+    runner::{
+        Runner, RunnerPart, TerminalMetrics, bitmap_font, font_files_with_size, parts,
+        terminal_metrics, theme,
+    },
     theme::Theme,
 };
 
-const USE_TTF_FONT: bool = false;
-const TTF_FONT_PATH: &str = "/usr/share/fonts/liberation-fonts/LiberationMono-Regular.ttf";
+const USE_TTF_FONT: bool = true;
+const FONT_SIZE: f32 = 15.0;
+const TERMINAL_METRICS: TerminalMetrics = TerminalMetrics {
+    cell_width: 10,
+    cell_height: 18,
+};
+const TTF_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/liberation-fonts/LiberationMono-Regular.ttf",
+    "/usr/share/fonts/symbols-nerd-font/SymbolsNerdFontMono-Regular.ttf",
+    "/usr/share/fonts/urw-fonts/StandardSymbolsPS.ttf",
+    "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+];
 
 pub(crate) fn runner() -> Runner {
     Runner::new()
         .with(terminal_font())
+        .with(terminal_metrics(TERMINAL_METRICS))
         .with(terminal_theme())
         .with(terminal_plugins())
 }
 
 fn terminal_font() -> impl RunnerPart {
     if USE_TTF_FONT {
-        font_file(TTF_FONT_PATH)
+        font_files_with_size(TTF_FONT_PATHS.iter().copied(), FONT_SIZE)
     } else {
         bitmap_font()
     }
@@ -93,7 +108,7 @@ fn cursor_trail_config() -> CursorTrailConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::{FontConfig, font_file, parts};
+    use crate::runner::{FontConfig, font_file, font_files_with_size, parts};
 
     fn nested_plugins() -> impl RunnerPart {
         parts()
@@ -126,8 +141,21 @@ mod tests {
         assert_eq!(
             runner.font(),
             &FontConfig::GlyphAtlas {
-                path: "/tmp/font.ttf".to_owned(),
+                paths: vec!["/tmp/font.ttf".to_owned()],
                 size: 14.0,
+            }
+        );
+    }
+
+    #[test]
+    fn runner_config_can_select_font_stack() {
+        let runner = Runner::new().with(font_files_with_size(["/tmp/a.ttf", "/tmp/b.ttf"], 16.0));
+
+        assert_eq!(
+            runner.font(),
+            &FontConfig::GlyphAtlas {
+                paths: vec!["/tmp/a.ttf".to_owned(), "/tmp/b.ttf".to_owned()],
+                size: 16.0,
             }
         );
     }
@@ -138,5 +166,37 @@ mod tests {
 
         assert_eq!(runner.theme().background, [10, 12, 16]);
         assert_eq!(runner.theme().ansi[1], [230, 75, 95]);
+    }
+
+    #[test]
+    fn runner_config_can_select_terminal_metrics() {
+        let runner = Runner::new().with(terminal_metrics(TerminalMetrics {
+            cell_width: 12,
+            cell_height: 20,
+        }));
+
+        assert_eq!(
+            runner.metrics(),
+            TerminalMetrics {
+                cell_width: 12,
+                cell_height: 20,
+            }
+        );
+    }
+
+    #[test]
+    fn runner_config_clamps_zero_terminal_metrics() {
+        let runner = Runner::new().with(terminal_metrics(TerminalMetrics {
+            cell_width: 0,
+            cell_height: 0,
+        }));
+
+        assert_eq!(
+            runner.metrics(),
+            TerminalMetrics {
+                cell_width: 1,
+                cell_height: 1,
+            }
+        );
     }
 }

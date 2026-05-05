@@ -5,44 +5,138 @@ use winit::{
     keyboard::{Key, ModifiersState, NamedKey},
 };
 
-use super::{CELL_HEIGHT, CELL_WIDTH};
+use crate::runner::TerminalMetrics;
 
 pub(super) fn encode_window_key(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
+    match event.logical_key.as_ref() {
+        Key::Character(ch) => encode_character_key(ch, modifiers),
+        Key::Named(key) => encode_named_key(&key, modifiers),
+        _ => None,
+    }
+}
+
+fn encode_character_key(ch: &str, modifiers: ModifiersState) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     if modifiers.alt_key() {
         bytes.push(0x1b);
     }
 
-    match event.logical_key.as_ref() {
-        Key::Character(ch) if modifiers.control_key() => {
-            let mut chars = ch.chars();
-            if let Some(ch) = chars.next().filter(|_| chars.next().is_none()) {
-                bytes.push(ctrl_byte(ch)?);
-            } else {
-                return None;
-            }
+    if modifiers.control_key() {
+        let mut chars = ch.chars();
+        if let Some(ch) = chars.next().filter(|_| chars.next().is_none()) {
+            bytes.push(ctrl_byte(ch)?);
+        } else {
+            return None;
         }
-        Key::Character(ch) => bytes.extend_from_slice(ch.as_bytes()),
-        Key::Named(NamedKey::Space) if modifiers.control_key() => bytes.push(0x00),
-        Key::Named(NamedKey::Space) => bytes.push(b' '),
-        Key::Named(NamedKey::Enter) => bytes.push(b'\r'),
-        Key::Named(NamedKey::Backspace) => bytes.push(0x7f),
-        Key::Named(NamedKey::Tab) => bytes.push(b'\t'),
-        Key::Named(NamedKey::Escape) => bytes.push(0x1b),
-        Key::Named(NamedKey::ArrowLeft) => bytes.extend_from_slice(b"\x1b[D"),
-        Key::Named(NamedKey::ArrowRight) => bytes.extend_from_slice(b"\x1b[C"),
-        Key::Named(NamedKey::ArrowUp) => bytes.extend_from_slice(b"\x1b[A"),
-        Key::Named(NamedKey::ArrowDown) => bytes.extend_from_slice(b"\x1b[B"),
-        Key::Named(NamedKey::Home) => bytes.extend_from_slice(b"\x1b[H"),
-        Key::Named(NamedKey::End) => bytes.extend_from_slice(b"\x1b[F"),
-        Key::Named(NamedKey::PageUp) => bytes.extend_from_slice(b"\x1b[5~"),
-        Key::Named(NamedKey::PageDown) => bytes.extend_from_slice(b"\x1b[6~"),
-        Key::Named(NamedKey::Delete) => bytes.extend_from_slice(b"\x1b[3~"),
-        Key::Named(NamedKey::Insert) => bytes.extend_from_slice(b"\x1b[2~"),
-        _ => return None,
+    } else {
+        bytes.extend_from_slice(ch.as_bytes());
+    }
+    Some(bytes)
+}
+
+fn encode_named_key(key: &NamedKey, modifiers: ModifiersState) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let alt_prefix = matches!(
+        key,
+        NamedKey::Space | NamedKey::Enter | NamedKey::Backspace | NamedKey::Escape
+    ) && modifiers.alt_key();
+    if alt_prefix {
+        bytes.push(0x1b);
     }
 
+    match key {
+        NamedKey::Space if modifiers.control_key() => bytes.push(0x00),
+        NamedKey::Space => bytes.push(b' '),
+        NamedKey::Enter => bytes.push(b'\r'),
+        NamedKey::Backspace => bytes.push(0x7f),
+        NamedKey::Tab if modifiers.shift_key() => return Some(b"\x1b[Z".to_vec()),
+        NamedKey::Tab => bytes.push(b'\t'),
+        NamedKey::Escape => bytes.push(0x1b),
+        NamedKey::ArrowLeft => return Some(csi_modified_final('D', modifiers)),
+        NamedKey::ArrowRight => return Some(csi_modified_final('C', modifiers)),
+        NamedKey::ArrowUp => return Some(csi_modified_final('A', modifiers)),
+        NamedKey::ArrowDown => return Some(csi_modified_final('B', modifiers)),
+        NamedKey::Home => return Some(csi_modified_final('H', modifiers)),
+        NamedKey::End => return Some(csi_modified_final('F', modifiers)),
+        NamedKey::PageUp => return Some(csi_numbered_key(5, modifiers)),
+        NamedKey::PageDown => return Some(csi_numbered_key(6, modifiers)),
+        NamedKey::Delete => return Some(csi_numbered_key(3, modifiers)),
+        NamedKey::Insert => return Some(csi_numbered_key(2, modifiers)),
+        NamedKey::F1 => return Some(function_key(1, modifiers)),
+        NamedKey::F2 => return Some(function_key(2, modifiers)),
+        NamedKey::F3 => return Some(function_key(3, modifiers)),
+        NamedKey::F4 => return Some(function_key(4, modifiers)),
+        NamedKey::F5 => return Some(function_key(5, modifiers)),
+        NamedKey::F6 => return Some(function_key(6, modifiers)),
+        NamedKey::F7 => return Some(function_key(7, modifiers)),
+        NamedKey::F8 => return Some(function_key(8, modifiers)),
+        NamedKey::F9 => return Some(function_key(9, modifiers)),
+        NamedKey::F10 => return Some(function_key(10, modifiers)),
+        NamedKey::F11 => return Some(function_key(11, modifiers)),
+        NamedKey::F12 => return Some(function_key(12, modifiers)),
+        _ => return None,
+    }
     Some(bytes)
+}
+
+fn csi_modified_final(final_byte: char, modifiers: ModifiersState) -> Vec<u8> {
+    if let Some(code) = modifier_code(modifiers) {
+        format!("\x1b[1;{code}{final_byte}").into_bytes()
+    } else {
+        format!("\x1b[{final_byte}").into_bytes()
+    }
+}
+
+fn csi_numbered_key(number: u8, modifiers: ModifiersState) -> Vec<u8> {
+    if let Some(code) = modifier_code(modifiers) {
+        format!("\x1b[{number};{code}~").into_bytes()
+    } else {
+        format!("\x1b[{number}~").into_bytes()
+    }
+}
+
+fn function_key(number: u8, modifiers: ModifiersState) -> Vec<u8> {
+    let csi_number = match number {
+        5 => 15,
+        6 => 17,
+        7 => 18,
+        8 => 19,
+        9 => 20,
+        10 => 21,
+        11 => 23,
+        12 => 24,
+        _ => 0,
+    };
+    if csi_number != 0 {
+        return csi_numbered_key(csi_number, modifiers);
+    }
+
+    let final_byte = match number {
+        1 => 'P',
+        2 => 'Q',
+        3 => 'R',
+        4 => 'S',
+        _ => return Vec::new(),
+    };
+    if let Some(code) = modifier_code(modifiers) {
+        format!("\x1b[1;{code}{final_byte}").into_bytes()
+    } else {
+        format!("\x1bO{final_byte}").into_bytes()
+    }
+}
+
+fn modifier_code(modifiers: ModifiersState) -> Option<u8> {
+    let mut code = 1;
+    if modifiers.shift_key() {
+        code += 1;
+    }
+    if modifiers.alt_key() {
+        code += 2;
+    }
+    if modifiers.control_key() {
+        code += 4;
+    }
+    (code > 1).then_some(code)
 }
 
 pub(super) fn shortcut_key(key: &Key, modifiers: ModifiersState, target: char) -> bool {
@@ -86,12 +180,13 @@ pub(super) fn mouse_cell(
     position: PhysicalPosition<f64>,
     cols: u16,
     rows: u16,
+    metrics: TerminalMetrics,
 ) -> Option<(u16, u16)> {
     if position.x < 0.0 || position.y < 0.0 {
         return None;
     }
-    let x = (position.x as u32 / CELL_WIDTH) as u16;
-    let y = (position.y as u32 / CELL_HEIGHT) as u16;
+    let x = (position.x as u32 / metrics.cell_width) as u16;
+    let y = (position.y as u32 / metrics.cell_height) as u16;
     (x < cols && y < rows).then_some((x, y))
 }
 
@@ -137,10 +232,10 @@ fn wheel_axis_codes(x: f32, y: f32) -> Vec<u8> {
     codes
 }
 
-pub(super) fn wheel_scroll_lines(delta: MouseScrollDelta) -> Vec<isize> {
+pub(super) fn wheel_scroll_lines(delta: MouseScrollDelta, metrics: TerminalMetrics) -> Vec<isize> {
     let raw = match delta {
         MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-        MouseScrollDelta::PixelDelta(position) => position.y / f64::from(CELL_HEIGHT),
+        MouseScrollDelta::PixelDelta(position) => position.y / f64::from(metrics.cell_height),
     };
     let lines = if raw.abs() < 1.0 {
         raw.signum() as isize
@@ -245,5 +340,48 @@ mod tests {
             ModifiersState::CONTROL | ModifiersState::SHIFT,
             'v'
         ));
+    }
+
+    #[test]
+    fn navigation_keys_use_xterm_modifier_encoding() {
+        assert_eq!(
+            encode_named_key(
+                &NamedKey::ArrowLeft,
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ),
+            Some(b"\x1b[1;6D".to_vec())
+        );
+        assert_eq!(
+            encode_named_key(&NamedKey::Delete, ModifiersState::ALT),
+            Some(b"\x1b[3;3~".to_vec())
+        );
+        assert_eq!(
+            encode_named_key(&NamedKey::Home, ModifiersState::empty()),
+            Some(b"\x1b[H".to_vec())
+        );
+    }
+
+    #[test]
+    fn function_keys_use_xterm_sequences() {
+        assert_eq!(
+            encode_named_key(&NamedKey::F1, ModifiersState::empty()),
+            Some(b"\x1bOP".to_vec())
+        );
+        assert_eq!(
+            encode_named_key(&NamedKey::F1, ModifiersState::CONTROL),
+            Some(b"\x1b[1;5P".to_vec())
+        );
+        assert_eq!(
+            encode_named_key(&NamedKey::F12, ModifiersState::SHIFT),
+            Some(b"\x1b[24;2~".to_vec())
+        );
+    }
+
+    #[test]
+    fn shift_tab_uses_backtab_sequence() {
+        assert_eq!(
+            encode_named_key(&NamedKey::Tab, ModifiersState::SHIFT),
+            Some(b"\x1b[Z".to_vec())
+        );
     }
 }

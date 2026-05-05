@@ -1,8 +1,9 @@
 use c_term_core::{Cell, TerminalCore};
 
-use crate::plugins::{OverlayCommand, OverlayKind};
-
-use super::{CELL_HEIGHT, CELL_WIDTH};
+use crate::{
+    plugins::{OverlayCommand, OverlayKind},
+    runner::TerminalMetrics,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Selection {
@@ -56,7 +57,12 @@ impl Selection {
         text
     }
 
-    pub(super) fn overlays(self, width: u16, color: [u8; 3]) -> Vec<OverlayCommand> {
+    pub(super) fn overlays(
+        self,
+        width: u16,
+        color: [u8; 3],
+        metrics: TerminalMetrics,
+    ) -> Vec<OverlayCommand> {
         let (start, end) = self.normalized();
         if start.1 == end.1 {
             return vec![selection_rect(
@@ -65,12 +71,20 @@ impl Selection {
                 end.0 - start.0 + 1,
                 1,
                 color,
+                metrics,
             )];
         }
 
         let mut overlays = vec![
-            selection_rect(start.0, start.1, width.saturating_sub(start.0), 1, color),
-            selection_rect(0, end.1, end.0 + 1, 1, color),
+            selection_rect(
+                start.0,
+                start.1,
+                width.saturating_sub(start.0),
+                1,
+                color,
+                metrics,
+            ),
+            selection_rect(0, end.1, end.0 + 1, 1, color, metrics),
         ];
         let middle_start = start.1 + 1;
         if middle_start < end.1 {
@@ -80,6 +94,7 @@ impl Selection {
                 width,
                 end.1 - middle_start,
                 color,
+                metrics,
             ));
         }
         overlays
@@ -129,11 +144,18 @@ fn push_row_text(text: &mut String, row: &[Cell], x_start: u16, x_end: u16) {
     text.truncate(before + trimmed);
 }
 
-fn selection_rect(x: u16, y: u16, width: u16, height: u16, color: [u8; 3]) -> OverlayCommand {
-    let left = usize::from(x) * CELL_WIDTH as usize;
-    let top = usize::from(y) * CELL_HEIGHT as usize;
-    let right = left + usize::from(width) * CELL_WIDTH as usize;
-    let bottom = top + usize::from(height) * CELL_HEIGHT as usize;
+fn selection_rect(
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    color: [u8; 3],
+    metrics: TerminalMetrics,
+) -> OverlayCommand {
+    let left = usize::from(x) * metrics.cell_width as usize;
+    let top = usize::from(y) * metrics.cell_height as usize;
+    let right = left + usize::from(width) * metrics.cell_width as usize;
+    let bottom = top + usize::from(height) * metrics.cell_height as usize;
     OverlayCommand {
         kind: OverlayKind::Rect,
         color,
@@ -184,7 +206,7 @@ mod tests {
             focus: (2, 1),
             dragging: false,
         }
-        .overlays(4, [80, 130, 220]);
+        .overlays(4, [80, 130, 220], TerminalMetrics::default());
 
         assert_eq!(overlays.len(), 2);
         assert_eq!(overlays[0].kind, OverlayKind::Rect);
@@ -197,7 +219,7 @@ mod tests {
             focus: (2, 4),
             dragging: false,
         }
-        .overlays(5, [80, 130, 220]);
+        .overlays(5, [80, 130, 220], TerminalMetrics::default());
 
         assert_eq!(overlays.len(), 3);
     }

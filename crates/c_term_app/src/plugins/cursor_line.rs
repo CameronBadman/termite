@@ -68,6 +68,7 @@ mod tests {
             grid: terminal.grid(),
             now: Instant::now(),
             theme: &theme,
+            metrics: crate::runner::TerminalMetrics::default(),
             overlays: Vec::new(),
             screen_opacity: 1.0,
         };

@@ -1,4 +1,5 @@
 use std::{
+    env,
     error::Error,
     io::{Read, Write},
     os::fd::AsRawFd,
@@ -23,7 +24,7 @@ use wl_clipboard_rs::{copy as wl_copy, paste as wl_paste};
 use crate::{PtyChild, set_pty_winsize, spawn_shell};
 use crate::{
     plugins::{PluginFrame, PluginHost},
-    runner::{FontConfig, Runner},
+    runner::{FontConfig, Runner, TerminalMetrics},
     theme::Theme,
 };
 
@@ -43,8 +44,6 @@ use pty_events::{UserEvent, spawn_pty_reader};
 use render_cache::RenderCache;
 use selection::Selection;
 
-pub(crate) const CELL_WIDTH: u32 = 8;
-pub(crate) const CELL_HEIGHT: u32 = 16;
 const ANIMATION_FRAME_MS: u64 = 8;
 const FRAME_INTERVAL_MS: u64 = 8;
 const DELAYED_RENDER_LOWER_US: u64 = 150;
@@ -57,8 +56,15 @@ pub(crate) fn run(runner: Runner) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let (shell, plugins, font, theme) = runner.into_parts();
-    let mut state = WindowBackend::new(shell, event_loop.create_proxy(), plugins, font, theme);
+    let (shell, plugins, font, metrics, theme) = runner.into_parts();
+    let mut state = WindowBackend::new(
+        shell,
+        event_loop.create_proxy(),
+        plugins,
+        font,
+        metrics,
+        theme,
+    );
     event_loop.run_app(&mut state)?;
     Ok(())
 }
@@ -74,6 +80,11 @@ struct WindowBackend {
     modifiers: ModifiersState,
     cols: u16,
     rows: u16,
+    font: FontConfig,
+    base_font: FontConfig,
+    metrics: TerminalMetrics,
+    base_metrics: TerminalMetrics,
+    zoom_steps: i16,
     theme: Theme,
     render_cache: RenderCache,
     selection: Option<Selection>,
@@ -87,6 +98,7 @@ struct WindowBackend {
     last_render: Option<Instant>,
     redraw_pending: bool,
     scroll_offset: usize,
+    perf: PerfStats,
 }
 
 impl WindowBackend {
@@ -95,6 +107,7 @@ impl WindowBackend {
         proxy: EventLoopProxy<UserEvent>,
         plugins: PluginHost,
         font: FontConfig,
+        metrics: TerminalMetrics,
         theme: Theme,
     ) -> Self {
         Self {
@@ -108,8 +121,13 @@ impl WindowBackend {
             modifiers: ModifiersState::empty(),
             cols: 1,
             rows: 1,
+            font: font.clone(),
+            base_font: font.clone(),
+            metrics,
+            base_metrics: metrics,
+            zoom_steps: 0,
             theme,
-            render_cache: RenderCache::new(font, theme),
+            render_cache: RenderCache::new(font, theme, metrics),
             selection: None,
             mouse_buttons: 0,
             mouse_position: None,
@@ -121,6 +139,7 @@ impl WindowBackend {
             last_render: None,
             redraw_pending: false,
             scroll_offset: 0,
+            perf: PerfStats::from_env(),
         }
     }
 
@@ -140,12 +159,13 @@ impl WindowBackend {
         );
 
         let size = window.inner_size();
-        let (cols, rows) = grid_size(size);
+        let (cols, rows) = grid_size(size, self.metrics);
         let renderer = GpuRenderer::new(
             window.clone(),
             size,
-            buffer_width(cols),
-            buffer_height(rows),
+            buffer_width(cols, self.metrics),
+            buffer_height(rows, self.metrics),
+            self.metrics,
         )?;
         let mut child = spawn_shell(&self.shell, cols, rows)?;
         spawn_pty_reader(&mut child, self.proxy.clone())?;
@@ -243,6 +263,8 @@ impl WindowBackend {
     }
 
     fn handle_pty_bytes(&mut self, bytes: Vec<u8>) {
+        let input_len = bytes.len();
+        let started = Instant::now();
         let Some(terminal) = &mut self.terminal else {
             return;
         };
@@ -261,7 +283,10 @@ impl WindowBackend {
             self.render_cache.invalidate();
         }
         let output = tick.output;
+        let damage_regions = tick.damage.regions.len();
         self.apply_damage(&tick.damage);
+        self.perf
+            .record_pty(input_len, damage_regions, started.elapsed());
         let now = Instant::now();
         if synchronized {
             self.disarm_delayed_render();
@@ -287,7 +312,7 @@ impl WindowBackend {
         let height = size.height.max(1);
         renderer.resize_surface(width, height);
 
-        let (cols, rows) = grid_size(size);
+        let (cols, rows) = grid_size(size, self.metrics);
         if cols == self.cols && rows == self.rows {
             self.mark_dirty();
             return;
@@ -308,8 +333,72 @@ impl WindowBackend {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        renderer.resize_texture(buffer_width(cols), buffer_height(rows));
+        renderer.resize_texture(
+            buffer_width(cols, self.metrics),
+            buffer_height(rows, self.metrics),
+            self.metrics,
+        );
 
+        self.cols = cols;
+        self.rows = rows;
+        self.render_cache.resize(cols, rows);
+        self.mark_dirty();
+    }
+
+    fn handle_zoom_key(&mut self, key: &Key) -> bool {
+        match zoom_key_action(key, self.modifiers) {
+            Some(ZoomAction::Adjust(delta)) => self.adjust_zoom(delta),
+            Some(ZoomAction::Reset) => self.reset_zoom(),
+            None => return false,
+        }
+        true
+    }
+
+    fn adjust_zoom(&mut self, delta: i16) {
+        let next = (self.zoom_steps + delta).clamp(-4, 8);
+        if next == self.zoom_steps {
+            return;
+        }
+        self.zoom_steps = next;
+        self.apply_zoom();
+    }
+
+    fn reset_zoom(&mut self) {
+        if self.zoom_steps == 0 {
+            return;
+        }
+        self.zoom_steps = 0;
+        self.apply_zoom();
+    }
+
+    fn apply_zoom(&mut self) {
+        self.metrics = scaled_metrics(self.base_metrics, self.zoom_steps);
+        self.font = scaled_font(&self.base_font, self.zoom_steps);
+        self.render_cache = RenderCache::new(self.font.clone(), self.theme, self.metrics);
+
+        let Some(window) = &self.window else {
+            return;
+        };
+        let (cols, rows) = grid_size(window.inner_size(), self.metrics);
+
+        self.selection = None;
+        self.scroll_offset = 0;
+        if let Some(child) = &mut self.child
+            && let Err(error) = set_pty_winsize(child.master.as_raw_fd(), cols, rows)
+        {
+            eprintln!("c-term: failed to resize PTY after zoom: {error}");
+        }
+        if let Some(terminal) = &mut self.terminal {
+            let tick = terminal.resize_reflow(cols, rows);
+            self.apply_damage(&tick.damage);
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.resize_texture(
+                buffer_width(cols, self.metrics),
+                buffer_height(rows, self.metrics),
+                self.metrics,
+            );
+        }
         self.cols = cols;
         self.rows = rows;
         self.render_cache.resize(cols, rows);
@@ -362,6 +451,9 @@ impl WindowBackend {
         }
         if shortcut_key(&event.logical_key, self.modifiers, 'v') {
             self.paste_clipboard();
+            return;
+        }
+        if self.handle_zoom_key(&event.logical_key) {
             return;
         }
 
@@ -443,7 +535,7 @@ impl WindowBackend {
     }
 
     fn handle_mouse_move(&mut self, position: PhysicalPosition<f64>) {
-        let Some(cell) = mouse_cell(position, self.cols, self.rows) else {
+        let Some(cell) = mouse_cell(position, self.cols, self.rows, self.metrics) else {
             self.mouse_position = None;
             return;
         };
@@ -481,7 +573,7 @@ impl WindowBackend {
         };
         let mouse = terminal.mouse();
         if mouse.tracking == MouseTracking::None {
-            for lines in wheel_scroll_lines(delta) {
+            for lines in wheel_scroll_lines(delta, self.metrics) {
                 let _ = self.scroll_view(lines);
             }
             return;
@@ -587,6 +679,7 @@ impl WindowBackend {
         };
 
         let viewing_history = self.scroll_offset > 0 && !terminal.is_alternate_screen();
+        let cache_started = Instant::now();
         if viewing_history {
             self.render_cache
                 .update_scrollback(terminal, self.scroll_offset);
@@ -594,16 +687,19 @@ impl WindowBackend {
             self.render_cache.update(terminal.grid());
         }
         let texture_update = self.render_cache.take_texture_update(self.rows);
+        let cache_elapsed = cache_started.elapsed();
 
         let Some(renderer) = &mut self.renderer else {
             return;
         };
 
+        let plugin_started = Instant::now();
         let (plugin_active, mut overlays, screen_opacity) = if !viewing_history {
             let mut plugin_frame = PluginFrame {
                 grid: terminal.grid(),
                 now: render_started,
                 theme: &self.theme,
+                metrics: self.metrics,
                 overlays: Vec::new(),
                 screen_opacity: 1.0,
             };
@@ -613,13 +709,18 @@ impl WindowBackend {
             (false, Vec::new(), 1.0)
         };
         if let Some(selection) = self.selection {
-            overlays.extend(selection.overlays(self.cols, self.theme.ansi[4]));
+            overlays.extend(selection.overlays(self.cols, self.theme.ansi[4], self.metrics));
         }
+        let plugin_elapsed = plugin_started.elapsed();
         let cursor = if viewing_history {
             [0.0, 0.0, 0.0, 0.0]
         } else {
-            cursor_uniform(terminal.grid())
+            cursor_uniform(terminal.grid(), self.metrics)
         };
+        let upload_full = texture_update.full;
+        let upload_row_bands = texture_update.rows.len();
+        let upload_scrolls = texture_update.scrolls.len();
+        let gpu_started = Instant::now();
         if let Err(error) = renderer.render(
             self.render_cache.frame.as_slice(),
             &texture_update,
@@ -629,7 +730,21 @@ impl WindowBackend {
         ) {
             eprintln!("c-term: GPU render failed: {error}");
         }
-        self.last_render = Some(Instant::now());
+        let gpu_elapsed = gpu_started.elapsed();
+        let render_finished = Instant::now();
+        self.perf.record_frame(
+            cache_elapsed,
+            plugin_elapsed,
+            gpu_elapsed,
+            render_finished.duration_since(render_started),
+            PerfFrameUpdate {
+                upload_full,
+                upload_row_bands,
+                upload_scrolls,
+                overlays: overlays.len(),
+            },
+        );
+        self.last_render = Some(render_finished);
         if plugin_active {
             self.schedule_animation(render_started);
         } else {
@@ -696,6 +811,128 @@ impl WindowBackend {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PerfStats {
+    enabled: bool,
+    interval_start: Instant,
+    pty_events: u64,
+    pty_bytes: u64,
+    pty_core_time: Duration,
+    damage_regions: u64,
+    frames: u64,
+    full_uploads: u64,
+    row_bands: u64,
+    scroll_uploads: u64,
+    overlays: u64,
+    cache_time: Duration,
+    plugin_time: Duration,
+    gpu_time: Duration,
+    render_time: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PerfFrameUpdate {
+    upload_full: bool,
+    upload_row_bands: usize,
+    upload_scrolls: usize,
+    overlays: usize,
+}
+
+impl PerfStats {
+    fn from_env() -> Self {
+        Self {
+            enabled: env::var_os("TERMITE_PERF").is_some(),
+            interval_start: Instant::now(),
+            pty_events: 0,
+            pty_bytes: 0,
+            pty_core_time: Duration::ZERO,
+            damage_regions: 0,
+            frames: 0,
+            full_uploads: 0,
+            row_bands: 0,
+            scroll_uploads: 0,
+            overlays: 0,
+            cache_time: Duration::ZERO,
+            plugin_time: Duration::ZERO,
+            gpu_time: Duration::ZERO,
+            render_time: Duration::ZERO,
+        }
+    }
+
+    fn record_pty(&mut self, bytes: usize, damage_regions: usize, core_time: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.pty_events += 1;
+        self.pty_bytes += bytes as u64;
+        self.damage_regions += damage_regions as u64;
+        self.pty_core_time += core_time;
+        self.report_if_due();
+    }
+
+    fn record_frame(
+        &mut self,
+        cache_time: Duration,
+        plugin_time: Duration,
+        gpu_time: Duration,
+        render_time: Duration,
+        update: PerfFrameUpdate,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.frames += 1;
+        self.full_uploads += u64::from(update.upload_full);
+        self.row_bands += update.upload_row_bands as u64;
+        self.scroll_uploads += update.upload_scrolls as u64;
+        self.overlays += update.overlays as u64;
+        self.cache_time += cache_time;
+        self.plugin_time += plugin_time;
+        self.gpu_time += gpu_time;
+        self.render_time += render_time;
+        self.report_if_due();
+    }
+
+    fn report_if_due(&mut self) {
+        let elapsed = self.interval_start.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+
+        let seconds = elapsed.as_secs_f64();
+        let mib = self.pty_bytes as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            concat!(
+                "termite-perf ",
+                "pty={:.2}MiB/s events={} damage={} ",
+                "frames={} full={} rows={} scrolls={} overlays={} ",
+                "core={:.2}ms cache={:.2}ms plugins={:.2}ms gpu={:.2}ms render={:.2}ms"
+            ),
+            mib / seconds,
+            self.pty_events,
+            self.damage_regions,
+            self.frames,
+            self.full_uploads,
+            self.row_bands,
+            self.scroll_uploads,
+            self.overlays,
+            duration_ms(self.pty_core_time),
+            duration_ms(self.cache_time),
+            duration_ms(self.plugin_time),
+            duration_ms(self.gpu_time),
+            duration_ms(self.render_time),
+        );
+        *self = Self {
+            enabled: true,
+            ..Self::from_env()
+        };
+    }
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
 impl ApplicationHandler<UserEvent> for WindowBackend {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.initialize(event_loop) {
@@ -736,38 +973,87 @@ impl ApplicationHandler<UserEvent> for WindowBackend {
     }
 }
 
-fn grid_size(size: PhysicalSize<u32>) -> (u16, u16) {
-    let cols = (size.width.max(CELL_WIDTH) / CELL_WIDTH).clamp(1, u32::from(u16::MAX)) as u16;
-    let rows = (size.height.max(CELL_HEIGHT) / CELL_HEIGHT).clamp(1, u32::from(u16::MAX)) as u16;
+fn grid_size(size: PhysicalSize<u32>, metrics: TerminalMetrics) -> (u16, u16) {
+    let cols = (size.width.max(metrics.cell_width) / metrics.cell_width)
+        .clamp(1, u32::from(u16::MAX)) as u16;
+    let rows = (size.height.max(metrics.cell_height) / metrics.cell_height)
+        .clamp(1, u32::from(u16::MAX)) as u16;
     (cols, rows)
 }
 
-fn buffer_width(cols: u16) -> u32 {
-    u32::from(cols) * CELL_WIDTH
+fn buffer_width(cols: u16, metrics: TerminalMetrics) -> u32 {
+    u32::from(cols) * metrics.cell_width
 }
 
-fn buffer_height(rows: u16) -> u32 {
-    u32::from(rows) * CELL_HEIGHT
+fn buffer_height(rows: u16, metrics: TerminalMetrics) -> u32 {
+    u32::from(rows) * metrics.cell_height
 }
 
-fn cursor_uniform(grid: &Grid) -> [f32; 4] {
+fn scaled_metrics(base: TerminalMetrics, zoom_steps: i16) -> TerminalMetrics {
+    let step = i32::from(zoom_steps);
+    TerminalMetrics {
+        cell_width: (base.cell_width as i32 + step).max(6) as u32,
+        cell_height: (base.cell_height as i32 + step * 2).max(10) as u32,
+    }
+}
+
+fn scaled_font(font: &FontConfig, zoom_steps: i16) -> FontConfig {
+    match font {
+        FontConfig::GlyphAtlas { paths, size } => FontConfig::GlyphAtlas {
+            paths: paths.clone(),
+            size: (*size + f32::from(zoom_steps)).clamp(8.0, 32.0),
+        },
+        FontConfig::Bitmap8x8 => FontConfig::Bitmap8x8,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZoomAction {
+    Adjust(i16),
+    Reset,
+}
+
+fn zoom_key_action(key: &Key, modifiers: ModifiersState) -> Option<ZoomAction> {
+    if !modifiers.control_key() {
+        return None;
+    }
+
+    match key.as_ref() {
+        Key::Character("+") | Key::Character("=") => Some(ZoomAction::Adjust(1)),
+        Key::Character("-") | Key::Character("_") => Some(ZoomAction::Adjust(-1)),
+        Key::Character("0") => Some(ZoomAction::Reset),
+        _ => None,
+    }
+}
+
+fn cursor_uniform(grid: &Grid, metrics: TerminalMetrics) -> [f32; 4] {
     let cursor = grid.cursor();
     if !cursor.visible {
         return [0.0, 0.0, 0.0, 0.0];
     }
     let (x_start, y_start, cursor_width, cursor_height) = match cursor.shape {
-        CursorShape::Block => (0, 0, CELL_WIDTH as usize, CELL_HEIGHT as usize),
-        CursorShape::Beam => (0, 0, (CELL_WIDTH as usize / 4).max(1), CELL_HEIGHT as usize),
+        CursorShape::Block => (
+            0,
+            0,
+            metrics.cell_width as usize,
+            metrics.cell_height as usize,
+        ),
+        CursorShape::Beam => (
+            0,
+            0,
+            (metrics.cell_width as usize / 4).max(1),
+            metrics.cell_height as usize,
+        ),
         CursorShape::Underline => (
             0,
-            CELL_HEIGHT as usize - (CELL_HEIGHT as usize / 5).max(1),
-            CELL_WIDTH as usize,
-            (CELL_HEIGHT as usize / 5).max(1),
+            metrics.cell_height as usize - (metrics.cell_height as usize / 5).max(1),
+            metrics.cell_width as usize,
+            (metrics.cell_height as usize / 5).max(1),
         ),
     };
     [
-        (usize::from(cursor.x) * CELL_WIDTH as usize + x_start) as f32,
-        (usize::from(cursor.y) * CELL_HEIGHT as usize + y_start) as f32,
+        (usize::from(cursor.x) * metrics.cell_width as usize + x_start) as f32,
+        (usize::from(cursor.y) * metrics.cell_height as usize + y_start) as f32,
         cursor_width as f32,
         cursor_height as f32,
     ]
@@ -775,15 +1061,19 @@ fn cursor_uniform(grid: &Grid) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::text::{bitmap_glyph, box_segments, draw_box_cell};
+    use super::text::{
+        CellPaint, ascii_glyph_fallback, bitmap_glyph, box_segments, draw_block_cell,
+        draw_box_cell, draw_shade_cell, sample_bitmap_axis,
+    };
     use super::*;
     use crate::window_backend::render_cache::frame_len;
     use c_term_core::TerminalCore;
 
     #[test]
     fn box_drawing_characters_are_drawn_without_font_fallback() {
-        let width = CELL_WIDTH as usize;
-        let mut frame = vec![0; width * CELL_HEIGHT as usize * 4];
+        let metrics = TerminalMetrics::default();
+        let width = metrics.cell_width as usize;
+        let mut frame = vec![0; width * metrics.cell_height as usize * 4];
 
         assert!(draw_box_cell(
             &mut frame,
@@ -791,11 +1081,14 @@ mod tests {
             0,
             0,
             '─',
-            [220, 224, 232],
-            [16, 18, 24],
+            CellPaint {
+                fg: [220, 224, 232],
+                bg: [16, 18, 24],
+                metrics,
+            },
         ));
 
-        let center_y = CELL_HEIGHT as usize / 2;
+        let center_y = metrics.cell_height as usize / 2;
         let center_index = (center_y * width + width / 2) * 4;
         assert_eq!(&frame[center_index..center_index + 3], &[220, 224, 232]);
         assert!(
@@ -811,6 +1104,62 @@ mod tests {
     }
 
     #[test]
+    fn block_characters_are_drawn_geometrically() {
+        let metrics = TerminalMetrics::default();
+        let width = metrics.cell_width as usize;
+        let mut frame = vec![0; width * metrics.cell_height as usize * 4];
+
+        assert!(draw_block_cell(
+            &mut frame,
+            width,
+            0,
+            0,
+            '▄',
+            CellPaint {
+                fg: [220, 224, 232],
+                bg: [16, 18, 24],
+                metrics,
+            },
+        ));
+
+        let top_index = (metrics.cell_height as usize / 4 * width + width / 2) * 4;
+        let bottom_index = (metrics.cell_height as usize * 3 / 4 * width + width / 2) * 4;
+        assert_eq!(&frame[top_index..top_index + 3], &[16, 18, 24]);
+        assert_eq!(&frame[bottom_index..bottom_index + 3], &[220, 224, 232]);
+    }
+
+    #[test]
+    fn shade_characters_are_drawn_as_mixed_pixels() {
+        let metrics = TerminalMetrics::default();
+        let width = metrics.cell_width as usize;
+        let mut frame = vec![0; width * metrics.cell_height as usize * 4];
+
+        assert!(draw_shade_cell(
+            &mut frame,
+            width,
+            0,
+            0,
+            '▒',
+            CellPaint {
+                fg: [220, 224, 232],
+                bg: [16, 18, 24],
+                metrics,
+            },
+        ));
+
+        assert!(
+            frame
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == [220, 224, 232])
+        );
+        assert!(
+            frame
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == [16, 18, 24])
+        );
+    }
+
+    #[test]
     fn bitmap_font_covers_extended_terminal_glyphs() {
         assert!(bitmap_glyph('A').is_some());
         assert!(bitmap_glyph('é').is_some());
@@ -820,20 +1169,84 @@ mod tests {
     }
 
     #[test]
+    fn smart_punctuation_has_ascii_glyph_fallbacks() {
+        assert_eq!(ascii_glyph_fallback('’'), Some('\''));
+        assert_eq!(ascii_glyph_fallback('“'), Some('"'));
+        assert_eq!(ascii_glyph_fallback('—'), Some('-'));
+        assert_eq!(ascii_glyph_fallback('…'), Some('.'));
+    }
+
+    #[test]
+    fn bitmap_fallback_sampling_is_centered_for_larger_cells() {
+        let metrics = TerminalMetrics::default();
+        let samples: Vec<_> = (0..metrics.cell_width as usize)
+            .map(|x| sample_bitmap_axis(x, metrics.cell_width as usize))
+            .collect();
+
+        assert_eq!(samples.first(), Some(&0));
+        assert_eq!(samples.last(), Some(&7));
+        assert!(samples.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn zoom_scales_metrics_and_ttf_size_from_base_config() {
+        assert_eq!(
+            scaled_metrics(
+                TerminalMetrics {
+                    cell_width: 10,
+                    cell_height: 18,
+                },
+                2,
+            ),
+            TerminalMetrics {
+                cell_width: 12,
+                cell_height: 22,
+            }
+        );
+
+        assert_eq!(
+            scaled_font(
+                &FontConfig::GlyphAtlas {
+                    paths: vec!["/tmp/a.ttf".to_owned()],
+                    size: 15.0,
+                },
+                2,
+            ),
+            FontConfig::GlyphAtlas {
+                paths: vec!["/tmp/a.ttf".to_owned()],
+                size: 17.0,
+            }
+        );
+    }
+
+    #[test]
+    fn shifted_minus_character_is_zoom_out_key() {
+        assert_eq!(
+            zoom_key_action(
+                &Key::Character("_".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ),
+            Some(ZoomAction::Adjust(-1))
+        );
+    }
+
+    #[test]
     fn base_frame_cache_updates_only_dirty_rows() {
         let mut terminal = TerminalCore::new(4, 2);
         let _ = terminal.process_pty_input(b"A\x1b[2;1HB");
-        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default());
+        let metrics = TerminalMetrics::default();
+        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default(), metrics);
 
         let frame = cache.update(terminal.grid());
-        let first_row = frame[..CELL_HEIGHT as usize * 4 * CELL_WIDTH as usize * 4].to_vec();
+        let first_row =
+            frame[..metrics.cell_height as usize * 4 * metrics.cell_width as usize * 4].to_vec();
 
         let tick = terminal.process_pty_input(b"\x1b[2;2HC");
         cache.apply_damage(&tick.damage, terminal.grid().height());
         let frame = cache.update(terminal.grid());
 
         assert_eq!(
-            &frame[..CELL_HEIGHT as usize * 4 * CELL_WIDTH as usize * 4],
+            &frame[..metrics.cell_height as usize * 4 * metrics.cell_width as usize * 4],
             first_row.as_slice()
         );
     }
@@ -843,18 +1256,23 @@ mod tests {
         let mut terminal = TerminalCore::new(3, 2);
         let _ = terminal.process_pty_input(b"ab\r\ncd\r\nef");
         let _ = terminal.resize(5, 2);
-        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default());
+        let metrics = TerminalMetrics::default();
+        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default(), metrics);
 
         let frame = cache.update_scrollback(&terminal, 1);
 
-        assert_eq!(frame.len(), frame_len(5, 2));
+        assert_eq!(frame.len(), frame_len(5, 2, metrics));
     }
 
     #[test]
     fn scrollback_cache_keeps_incremental_scrolls_clean() {
         let mut terminal = TerminalCore::new(3, 2);
         let _ = terminal.process_pty_input(b"aa\r\nbb\r\ncc\r\ndd");
-        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default());
+        let mut cache = RenderCache::new(
+            FontConfig::Bitmap8x8,
+            Theme::default(),
+            TerminalMetrics::default(),
+        );
 
         let _ = cache.update_scrollback(&terminal, 1);
         let _ = cache.update_scrollback(&terminal, 2);

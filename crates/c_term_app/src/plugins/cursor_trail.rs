@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use c_term_core::{Color, Cursor, CursorShape, Grid};
 
+use crate::runner::TerminalMetrics;
 use crate::theme::Theme;
-use crate::window_backend::{CELL_HEIGHT, CELL_WIDTH};
 
 use super::{Plugin, PluginFrame, Point};
 
@@ -56,27 +56,29 @@ struct CursorRect {
 }
 
 impl CursorRect {
-    fn from_cursor(cursor: Cursor) -> Self {
-        let left = f32::from(cursor.x) * CELL_WIDTH as f32;
-        let top = f32::from(cursor.y) * CELL_HEIGHT as f32;
+    fn from_cursor(cursor: Cursor, metrics: TerminalMetrics) -> Self {
+        let cell_width = metrics.cell_width as f32;
+        let cell_height = metrics.cell_height as f32;
+        let left = f32::from(cursor.x) * cell_width;
+        let top = f32::from(cursor.y) * cell_height;
         match cursor.shape {
             CursorShape::Block => Self {
                 left,
-                right: left + CELL_WIDTH as f32,
+                right: left + cell_width,
                 top,
-                bottom: top + CELL_HEIGHT as f32,
+                bottom: top + cell_height,
             },
             CursorShape::Beam => Self {
                 left,
-                right: left + (CELL_WIDTH as f32 * 0.25).max(1.0),
+                right: left + (cell_width * 0.25).max(1.0),
                 top,
-                bottom: top + CELL_HEIGHT as f32,
+                bottom: top + cell_height,
             },
             CursorShape::Underline => Self {
                 left,
-                right: left + CELL_WIDTH as f32,
-                top: top + CELL_HEIGHT as f32 - (CELL_HEIGHT as f32 * 0.18).max(1.0),
-                bottom: top + CELL_HEIGHT as f32,
+                right: left + cell_width,
+                top: top + cell_height - (cell_height * 0.18).max(1.0),
+                bottom: top + cell_height,
             },
         }
     }
@@ -121,7 +123,13 @@ impl CursorTrail {
         }
     }
 
-    fn observe_cursor(&mut self, grid: &Grid, theme: Theme, now: Instant) {
+    fn observe_cursor(
+        &mut self,
+        grid: &Grid,
+        theme: Theme,
+        metrics: TerminalMetrics,
+        now: Instant,
+    ) {
         let cursor = grid.cursor();
         let generation = grid.generation();
         if grid.is_synchronized() {
@@ -129,7 +137,7 @@ impl CursorTrail {
             self.last_generation = Some(generation);
             self.last_change = now;
             if !self.needs_render {
-                self.snap_to_cursor(grid, theme, cursor, now);
+                self.snap_to_cursor(grid, theme, metrics, cursor, now);
             }
             return;
         }
@@ -137,14 +145,14 @@ impl CursorTrail {
             self.last_cursor = Some(cursor);
             self.last_generation = Some(generation);
             self.last_change = now;
-            self.snap_to_cursor(grid, theme, cursor, now);
+            self.snap_to_cursor(grid, theme, metrics, cursor, now);
             return;
         };
         if self.is_large_redraw(grid, last, cursor) {
             self.last_cursor = Some(cursor);
             self.last_generation = Some(generation);
             self.last_change = now;
-            self.snap_to_cursor(grid, theme, cursor, now);
+            self.snap_to_cursor(grid, theme, metrics, cursor, now);
             return;
         }
         if last == cursor {
@@ -156,19 +164,19 @@ impl CursorTrail {
             self.last_cursor = Some(cursor);
             self.last_generation = Some(generation);
             self.last_change = now;
-            self.snap_to_cursor(grid, theme, cursor, now);
+            self.snap_to_cursor(grid, theme, metrics, cursor, now);
             return;
         }
 
         let stable = now.duration_since(self.last_change);
         if last.visible && cursor.visible && stable >= Duration::from_millis(self.config.hold_ms) {
             if cursor_distance(last, cursor) >= self.config.threshold || self.needs_render {
-                self.set_target(grid, theme, cursor, now);
+                self.set_target(grid, theme, metrics, cursor, now);
             } else {
-                self.snap_to_cursor(grid, theme, cursor, now);
+                self.snap_to_cursor(grid, theme, metrics, cursor, now);
             }
         } else if !cursor.visible || !self.needs_render {
-            self.snap_to_cursor(grid, theme, cursor, now);
+            self.snap_to_cursor(grid, theme, metrics, cursor, now);
         }
         self.last_cursor = Some(cursor);
         self.last_generation = Some(generation);
@@ -190,9 +198,16 @@ impl CursorTrail {
         grid.generation().saturating_sub(last_generation) > threshold
     }
 
-    fn snap_to_cursor(&mut self, grid: &Grid, theme: Theme, cursor: Cursor, now: Instant) {
+    fn snap_to_cursor(
+        &mut self,
+        grid: &Grid,
+        theme: Theme,
+        metrics: TerminalMetrics,
+        cursor: Cursor,
+        now: Instant,
+    ) {
         if cursor.visible {
-            let rect = CursorRect::from_cursor(cursor);
+            let rect = CursorRect::from_cursor(cursor, metrics);
             self.target = Some(rect);
             self.corners = rect.corners();
             self.color = trail_color(self.config, theme, grid, cursor);
@@ -203,8 +218,15 @@ impl CursorTrail {
         self.needs_render = false;
     }
 
-    fn set_target(&mut self, grid: &Grid, theme: Theme, cursor: Cursor, now: Instant) {
-        let target = CursorRect::from_cursor(cursor);
+    fn set_target(
+        &mut self,
+        grid: &Grid,
+        theme: Theme,
+        metrics: TerminalMetrics,
+        cursor: Cursor,
+        now: Instant,
+    ) {
+        let target = CursorRect::from_cursor(cursor, metrics);
         let was_idle = !self.needs_render;
         if self.target.is_none() {
             self.corners = target.corners();
@@ -304,7 +326,7 @@ impl CursorTrail {
 
 impl Plugin for CursorTrail {
     fn draw(&mut self, frame: &mut PluginFrame<'_>) -> bool {
-        self.observe_cursor(frame.grid, *frame.theme, frame.now);
+        self.observe_cursor(frame.grid, *frame.theme, frame.metrics, frame.now);
         self.update_corners(frame.now);
         self.draw_trail(frame);
         self.needs_render
@@ -409,6 +431,7 @@ mod tests {
             grid: terminal.grid(),
             now,
             theme,
+            metrics: TerminalMetrics::default(),
             overlays: Vec::new(),
             screen_opacity: 1.0,
         }
@@ -486,38 +509,60 @@ mod tests {
 
     #[test]
     fn cursor_rect_uses_cell_bounds() {
-        let rect = CursorRect::from_cursor(Cursor {
-            x: 2,
-            y: 1,
-            visible: true,
-            shape: CursorShape::Block,
-        });
+        let metrics = TerminalMetrics::default();
+        let rect = CursorRect::from_cursor(
+            Cursor {
+                x: 2,
+                y: 1,
+                visible: true,
+                shape: CursorShape::Block,
+            },
+            metrics,
+        );
 
         assert_eq!(
             rect.corners(),
-            [(24.0, 16.0), (24.0, 32.0), (16.0, 32.0), (16.0, 16.0)]
+            [
+                (3.0 * metrics.cell_width as f32, metrics.cell_height as f32),
+                (
+                    3.0 * metrics.cell_width as f32,
+                    2.0 * metrics.cell_height as f32,
+                ),
+                (
+                    2.0 * metrics.cell_width as f32,
+                    2.0 * metrics.cell_height as f32,
+                ),
+                (2.0 * metrics.cell_width as f32, metrics.cell_height as f32),
+            ]
         );
     }
 
     #[test]
     fn cursor_rect_tracks_cursor_shape() {
-        let beam = CursorRect::from_cursor(Cursor {
-            x: 2,
-            y: 1,
-            visible: true,
-            shape: CursorShape::Beam,
-        });
-        let underline = CursorRect::from_cursor(Cursor {
-            x: 2,
-            y: 1,
-            visible: true,
-            shape: CursorShape::Underline,
-        });
+        let metrics = TerminalMetrics::default();
+        let beam = CursorRect::from_cursor(
+            Cursor {
+                x: 2,
+                y: 1,
+                visible: true,
+                shape: CursorShape::Beam,
+            },
+            metrics,
+        );
+        let underline = CursorRect::from_cursor(
+            Cursor {
+                x: 2,
+                y: 1,
+                visible: true,
+                shape: CursorShape::Underline,
+            },
+            metrics,
+        );
 
-        assert!(beam.right - beam.left < CELL_WIDTH as f32);
-        assert_eq!(beam.bottom - beam.top, CELL_HEIGHT as f32);
-        assert_eq!(underline.right - underline.left, CELL_WIDTH as f32);
-        assert!(underline.bottom - underline.top < CELL_HEIGHT as f32);
+        assert!(beam.right - beam.left < metrics.cell_width as f32);
+        assert_eq!(beam.bottom - beam.top, metrics.cell_height as f32);
+        assert_eq!(underline.right - underline.left, metrics.cell_width as f32);
+        assert!(underline.bottom - underline.top < metrics.cell_height as f32);
     }
 
     #[test]
@@ -596,6 +641,7 @@ mod tests {
         plugin.snap_to_cursor(
             terminal.grid(),
             Theme::default(),
+            TerminalMetrics::default(),
             Cursor {
                 x: 0,
                 y: 0,
@@ -607,6 +653,7 @@ mod tests {
         plugin.set_target(
             terminal.grid(),
             Theme::default(),
+            TerminalMetrics::default(),
             Cursor {
                 x: 3,
                 y: 0,
@@ -622,12 +669,15 @@ mod tests {
         assert!(plugin.corners[0].0 > before);
         assert!(
             plugin.corners[0].0
-                < CursorRect::from_cursor(Cursor {
-                    x: 3,
-                    y: 0,
-                    visible: true,
-                    shape: CursorShape::Block,
-                })
+                < CursorRect::from_cursor(
+                    Cursor {
+                        x: 3,
+                        y: 0,
+                        visible: true,
+                        shape: CursorShape::Block,
+                    },
+                    TerminalMetrics::default()
+                )
                 .corners()[0]
                     .0
         );

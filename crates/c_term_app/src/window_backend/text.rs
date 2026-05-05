@@ -7,9 +7,10 @@ use font8x8::{
     SGA_FONTS, UnicodeFonts,
 };
 
-use crate::{runner::FontConfig, theme::Theme};
-
-use super::{CELL_HEIGHT, CELL_WIDTH};
+use crate::{
+    runner::{FontConfig, TerminalMetrics},
+    theme::Theme,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct GlyphKey {
@@ -35,14 +36,30 @@ struct GlyphBitmap {
 pub(super) struct TextRenderer {
     fonts: Vec<LoadedFont>,
     glyphs: HashMap<GlyphKey, GlyphBitmap>,
+    metrics: TerminalMetrics,
     theme: Theme,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct CellPaint {
+    pub(super) fg: [u8; 3],
+    pub(super) bg: [u8; 3],
+    pub(super) metrics: TerminalMetrics,
+}
+
+#[derive(Clone, Copy)]
+struct GlyphPaint {
+    color: [u8; 3],
+    x_shift: i16,
+    metrics: TerminalMetrics,
+}
+
 impl TextRenderer {
-    pub(super) fn new(font: FontConfig, theme: Theme) -> Self {
+    pub(super) fn new(font: FontConfig, theme: Theme, metrics: TerminalMetrics) -> Self {
         Self {
             fonts: load_fonts(font),
             glyphs: HashMap::new(),
+            metrics,
             theme,
         }
     }
@@ -73,32 +90,63 @@ impl TextRenderer {
     ) {
         let fg = self.theme.color(style.foreground);
         let bg = self.theme.color(style.background);
-        if draw_box_cell(frame, width, cell_x, cell_y, ch, fg, bg) {
+        let paint = CellPaint {
+            fg,
+            bg,
+            metrics: self.metrics,
+        };
+        if draw_special_cell(frame, width, cell_x, cell_y, ch, paint) {
             return;
         }
 
-        fill_cell(frame, width, cell_x, cell_y, bg);
+        fill_cell(frame, width, cell_x, cell_y, bg, self.metrics);
         if ch != ' ' {
             if let Some(key) = self.glyph_key(ch) {
                 self.ensure_glyph(key);
                 if let Some(glyph) = self.glyphs.get(&key) {
-                    draw_glyph_bitmap(frame, width, cell_x, cell_y, glyph, fg, 0);
+                    draw_glyph_bitmap(
+                        frame,
+                        width,
+                        cell_x,
+                        cell_y,
+                        glyph,
+                        GlyphPaint {
+                            color: fg,
+                            x_shift: 0,
+                            metrics: self.metrics,
+                        },
+                    );
                     if style.bold {
-                        draw_glyph_bitmap(frame, width, cell_x, cell_y, glyph, fg, 1);
+                        draw_glyph_bitmap(
+                            frame,
+                            width,
+                            cell_x,
+                            cell_y,
+                            glyph,
+                            GlyphPaint {
+                                color: fg,
+                                x_shift: 1,
+                                metrics: self.metrics,
+                            },
+                        );
                     }
                 }
             } else {
-                draw_bitmap_cell(frame, width, cell_x, cell_y, ch, (fg, bg), style.bold);
+                draw_bitmap_cell(frame, width, cell_x, cell_y, ch, style.bold, paint);
             }
         }
         if style.underline {
-            draw_underline(frame, width, cell_x, cell_y, fg);
+            draw_underline(frame, width, cell_x, cell_y, fg, self.metrics);
         }
     }
 
     fn glyph_key(&self, ch: char) -> Option<GlyphKey> {
         self.font_index(ch)
             .map(|font| GlyphKey { font, ch })
+            .or_else(|| {
+                ascii_glyph_fallback(ch)
+                    .and_then(|ch| self.font_index(ch).map(|font| GlyphKey { font, ch }))
+            })
             .or_else(|| self.font_index('?').map(|font| GlyphKey { font, ch: '?' }))
     }
 
@@ -112,39 +160,43 @@ impl TextRenderer {
         if self.glyphs.contains_key(&key) {
             return;
         }
-        let glyph = rasterize_glyph(&self.fonts[key.font], key.ch);
+        let glyph = rasterize_glyph(&self.fonts[key.font], key.ch, self.metrics);
         self.glyphs.insert(key, glyph);
     }
 }
 
 fn load_fonts(font: FontConfig) -> Vec<LoadedFont> {
-    let FontConfig::GlyphAtlas { path, size } = font else {
+    let FontConfig::GlyphAtlas { paths, size } = font else {
         return Vec::new();
     };
 
     let mut loaded = Vec::new();
-    if let Ok(bytes) = fs::read(path)
-        && let Ok(font) = FontArc::try_from_vec(bytes)
-    {
-        let scaled = font.as_scaled(size);
-        let ascent = scaled.ascent();
-        let height = scaled.height();
-        loaded.push(LoadedFont {
-            font,
-            scale: PxScale::from(size),
-            ascent,
-            height,
-        });
+    for path in paths {
+        if let Ok(bytes) = fs::read(path)
+            && let Ok(font) = FontArc::try_from_vec(bytes)
+        {
+            let scaled = font.as_scaled(size);
+            let ascent = scaled.ascent();
+            let height = scaled.height();
+            loaded.push(LoadedFont {
+                font,
+                scale: PxScale::from(size),
+                ascent,
+                height,
+            });
+        }
     }
     loaded
 }
 
-fn rasterize_glyph(font: &LoadedFont, ch: char) -> GlyphBitmap {
+fn rasterize_glyph(font: &LoadedFont, ch: char, metrics: TerminalMetrics) -> GlyphBitmap {
     let scaled = font.font.as_scaled(font.scale);
     let glyph_id = scaled.glyph_id(ch);
     let advance = scaled.h_advance(glyph_id);
-    let x = ((CELL_WIDTH as f32 - advance) * 0.5).floor().max(-1.0);
-    let baseline = ((CELL_HEIGHT as f32 - font.height) * 0.5 + font.ascent).round();
+    let x = ((metrics.cell_width as f32 - advance) * 0.5)
+        .floor()
+        .max(-1.0);
+    let baseline = ((metrics.cell_height as f32 - font.height) * 0.5 + font.ascent).round();
     let glyph = glyph_id.with_scale_and_position(font.scale, point(x, baseline));
     let Some(outlined) = scaled.outline_glyph(glyph) else {
         return GlyphBitmap {
@@ -177,11 +229,18 @@ fn rasterize_glyph(font: &LoadedFont, ch: char) -> GlyphBitmap {
     }
 }
 
-fn fill_cell(frame: &mut [u8], width: usize, cell_x: u16, cell_y: u16, color: [u8; 3]) {
-    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
-    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
-    for py in 0..CELL_HEIGHT as usize {
-        for px in 0..CELL_WIDTH as usize {
+fn fill_cell(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    color: [u8; 3],
+    metrics: TerminalMetrics,
+) {
+    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
+    for py in 0..metrics.cell_height as usize {
+        for px in 0..metrics.cell_width as usize {
             let index = ((origin_y + py) * width + origin_x + px) * 4;
             frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
         }
@@ -194,19 +253,19 @@ fn draw_glyph_bitmap(
     cell_x: u16,
     cell_y: u16,
     glyph: &GlyphBitmap,
-    color: [u8; 3],
-    x_shift: i16,
+    paint: GlyphPaint,
 ) {
-    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
-    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
+    let metrics = paint.metrics;
+    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
     for y in 0..glyph.height {
         let cell_py = glyph.top + y as i16;
-        if !(0..CELL_HEIGHT as i16).contains(&cell_py) {
+        if !(0..metrics.cell_height as i16).contains(&cell_py) {
             continue;
         }
         for x in 0..glyph.width {
-            let cell_px = glyph.left + x as i16 + x_shift;
-            if !(0..CELL_WIDTH as i16).contains(&cell_px) {
+            let cell_px = glyph.left + x as i16 + paint.x_shift;
+            if !(0..metrics.cell_width as i16).contains(&cell_px) {
                 continue;
             }
             let alpha = glyph.alpha[usize::from(y) * usize::from(glyph.width) + usize::from(x)];
@@ -214,7 +273,7 @@ fn draw_glyph_bitmap(
                 continue;
             }
             let index = ((origin_y + cell_py as usize) * width + origin_x + cell_px as usize) * 4;
-            blend_pixel(&mut frame[index..index + 4], color, alpha);
+            blend_pixel(&mut frame[index..index + 4], paint.color, alpha);
         }
     }
 }
@@ -234,22 +293,40 @@ fn draw_bitmap_cell(
     cell_x: u16,
     cell_y: u16,
     ch: char,
-    colors: ([u8; 3], [u8; 3]),
     bold: bool,
+    paint: CellPaint,
 ) {
-    let (fg, bg) = colors;
-    let glyph = bitmap_glyph(ch).unwrap_or_else(|| bitmap_glyph('?').unwrap_or([0; 8]));
-    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
-    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
-    for py in 0..CELL_HEIGHT as usize {
-        let glyph_row = glyph[py / 2];
-        for px in 0..CELL_WIDTH as usize {
-            let bit = ((glyph_row >> px) & 1) != 0
-                || (bold && px > 0 && ((glyph_row >> (px - 1)) & 1) != 0);
-            let color = if bit { fg } else { bg };
+    let metrics = paint.metrics;
+    let glyph = bitmap_glyph(ch)
+        .or_else(|| ascii_glyph_fallback(ch).and_then(bitmap_glyph))
+        .unwrap_or_else(|| bitmap_glyph('?').unwrap_or([0; 8]));
+    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
+    for py in 0..metrics.cell_height as usize {
+        let glyph_y = sample_bitmap_axis(py, metrics.cell_height as usize);
+        let glyph_row = glyph[glyph_y];
+        for px in 0..metrics.cell_width as usize {
+            let glyph_x = sample_bitmap_axis(px, metrics.cell_width as usize);
+            let bit = ((glyph_row >> glyph_x) & 1) != 0
+                || (bold && glyph_x > 0 && ((glyph_row >> (glyph_x - 1)) & 1) != 0);
+            let color = if bit { paint.fg } else { paint.bg };
             let index = ((origin_y + py) * width + origin_x + px) * 4;
             frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
         }
+    }
+}
+
+pub(super) fn sample_bitmap_axis(pixel: usize, cell_size: usize) -> usize {
+    ((pixel * 8 + cell_size / 2) / cell_size).min(7)
+}
+
+pub(super) fn ascii_glyph_fallback(ch: char) -> Option<char> {
+    match ch {
+        '‘' | '’' | '‚' | '‛' => Some('\''),
+        '“' | '”' | '„' | '‟' => Some('"'),
+        '‐' | '‑' | '‒' | '–' | '—' | '―' => Some('-'),
+        '…' => Some('.'),
+        _ => None,
     }
 }
 
@@ -265,14 +342,182 @@ pub(super) fn bitmap_glyph(ch: char) -> Option<[u8; 8]> {
         .or_else(|| SGA_FONTS.get(ch))
 }
 
-fn draw_underline(frame: &mut [u8], width: usize, cell_x: u16, cell_y: u16, color: [u8; 3]) {
-    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
-    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
-    let y = origin_y + CELL_HEIGHT as usize - 2;
-    for px in 0..CELL_WIDTH as usize {
+fn draw_underline(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    color: [u8; 3],
+    metrics: TerminalMetrics,
+) {
+    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
+    let y = origin_y + metrics.cell_height as usize - 2;
+    for px in 0..metrics.cell_width as usize {
         let index = (y * width + origin_x + px) * 4;
         frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
     }
+}
+
+fn draw_special_cell(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    ch: char,
+    paint: CellPaint,
+) -> bool {
+    draw_block_cell(frame, width, cell_x, cell_y, ch, paint)
+        || draw_shade_cell(frame, width, cell_x, cell_y, ch, paint)
+        || draw_box_cell(frame, width, cell_x, cell_y, ch, paint)
+}
+
+pub(super) fn draw_block_cell(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    ch: char,
+    paint: CellPaint,
+) -> bool {
+    let metrics = paint.metrics;
+    let cell_width = metrics.cell_width as usize;
+    let cell_height = metrics.cell_height as usize;
+    let mut regions = [(0, 0, 0, 0); 2];
+    let region_count = match ch {
+        '█' => {
+            regions[0] = (0, 0, cell_width, cell_height);
+            1
+        }
+        '▀' => {
+            regions[0] = (0, 0, cell_width, cell_height / 2);
+            1
+        }
+        '▄' => {
+            regions[0] = (0, cell_height / 2, cell_width, cell_height / 2);
+            1
+        }
+        '▌' => {
+            regions[0] = (0, 0, cell_width / 2, cell_height);
+            1
+        }
+        '▐' => {
+            regions[0] = (cell_width / 2, 0, cell_width / 2, cell_height);
+            1
+        }
+        '▘' => {
+            regions[0] = (0, 0, cell_width / 2, cell_height / 2);
+            1
+        }
+        '▝' => {
+            regions[0] = (cell_width / 2, 0, cell_width / 2, cell_height / 2);
+            1
+        }
+        '▖' => {
+            regions[0] = (0, cell_height / 2, cell_width / 2, cell_height / 2);
+            1
+        }
+        '▗' => {
+            regions[0] = (
+                cell_width / 2,
+                cell_height / 2,
+                cell_width / 2,
+                cell_height / 2,
+            );
+            1
+        }
+        '▚' => {
+            regions[0] = (0, 0, cell_width / 2, cell_height / 2);
+            regions[1] = (
+                cell_width / 2,
+                cell_height / 2,
+                cell_width / 2,
+                cell_height / 2,
+            );
+            2
+        }
+        '▞' => {
+            regions[0] = (cell_width / 2, 0, cell_width / 2, cell_height / 2);
+            regions[1] = (0, cell_height / 2, cell_width / 2, cell_height / 2);
+            2
+        }
+        '▙' => {
+            regions[0] = (0, 0, cell_width / 2, cell_height / 2);
+            regions[1] = (0, cell_height / 2, cell_width, cell_height / 2);
+            2
+        }
+        '▛' => {
+            regions[0] = (0, 0, cell_width, cell_height / 2);
+            regions[1] = (0, cell_height / 2, cell_width / 2, cell_height / 2);
+            2
+        }
+        '▜' => {
+            regions[0] = (0, 0, cell_width, cell_height / 2);
+            regions[1] = (
+                cell_width / 2,
+                cell_height / 2,
+                cell_width / 2,
+                cell_height / 2,
+            );
+            2
+        }
+        '▟' => {
+            regions[0] = (cell_width / 2, 0, cell_width / 2, cell_height / 2);
+            regions[1] = (0, cell_height / 2, cell_width, cell_height / 2);
+            2
+        }
+        _ => return false,
+    };
+
+    fill_cell(frame, width, cell_x, cell_y, paint.bg, metrics);
+    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
+    for &(x, y, region_width, region_height) in &regions[..region_count] {
+        for py in y..y + region_height {
+            for px in x..x + region_width {
+                let index = ((origin_y + py) * width + origin_x + px) * 4;
+                frame[index..index + 4].copy_from_slice(&[
+                    paint.fg[0],
+                    paint.fg[1],
+                    paint.fg[2],
+                    0xff,
+                ]);
+            }
+        }
+    }
+    true
+}
+
+pub(super) fn draw_shade_cell(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    ch: char,
+    paint: CellPaint,
+) -> bool {
+    let metrics = paint.metrics;
+    let threshold = match ch {
+        '░' => 1,
+        '▒' => 2,
+        '▓' => 3,
+        _ => return false,
+    };
+    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
+    for py in 0..metrics.cell_height as usize {
+        for px in 0..metrics.cell_width as usize {
+            let pattern = (px + py * 3) & 3;
+            let color = if pattern < threshold {
+                paint.fg
+            } else {
+                paint.bg
+            };
+            let index = ((origin_y + py) * width + origin_x + px) * 4;
+            frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
+        }
+    }
+    true
 }
 
 pub(super) fn draw_box_cell(
@@ -281,25 +526,29 @@ pub(super) fn draw_box_cell(
     cell_x: u16,
     cell_y: u16,
     ch: char,
-    fg: [u8; 3],
-    bg: [u8; 3],
+    paint: CellPaint,
 ) -> bool {
+    let metrics = paint.metrics;
     let Some((left, right, up, down)) = box_segments(ch) else {
         return false;
     };
-    let origin_x = usize::from(cell_x) * CELL_WIDTH as usize;
-    let origin_y = usize::from(cell_y) * CELL_HEIGHT as usize;
-    let center_x = CELL_WIDTH as usize / 2;
-    let center_y = CELL_HEIGHT as usize / 2;
+    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
+    let center_x = metrics.cell_width as usize / 2;
+    let center_y = metrics.cell_height as usize / 2;
     let thickness = 2;
 
-    for py in 0..CELL_HEIGHT as usize {
-        for px in 0..CELL_WIDTH as usize {
+    for py in 0..metrics.cell_height as usize {
+        for px in 0..metrics.cell_width as usize {
             let horizontal = py.abs_diff(center_y) < thickness
                 && ((left && px <= center_x) || (right && px >= center_x));
             let vertical = px.abs_diff(center_x) < thickness
                 && ((up && py <= center_y) || (down && py >= center_y));
-            let color = if horizontal || vertical { fg } else { bg };
+            let color = if horizontal || vertical {
+                paint.fg
+            } else {
+                paint.bg
+            };
             let index = ((origin_y + py) * width + origin_x + px) * 4;
             frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
         }

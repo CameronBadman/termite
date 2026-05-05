@@ -114,9 +114,28 @@ where
         self.tick()
     }
 
-    pub fn process_pty_input(&mut self, input: &[u8]) -> CoreTick {
+    pub fn resize_reflow(&mut self, width: u16, height: u16) -> CoreTick {
+        if self.alternate_grid.is_some() {
+            return self.resize(width, height);
+        }
+
+        let _ = self.grid.resize_reflow(width, height);
+        self.tick()
+    }
+
+    pub fn process_pty_input(&mut self, mut input: &[u8]) -> CoreTick {
         if input.is_empty() {
             return self.tick();
+        }
+        if self.parser.can_process_ascii_fast_path() {
+            let prefix_len = fast_ascii_prefix_len(input);
+            if prefix_len > 0 {
+                self.process_fast_ascii(&input[..prefix_len]);
+                if prefix_len == input.len() {
+                    return self.tick();
+                }
+                input = &input[prefix_len..];
+            }
         }
 
         let mut actions = Vec::new();
@@ -126,6 +145,46 @@ where
             self.apply_action(action);
         }
         self.tick()
+    }
+
+    fn process_fast_ascii(&mut self, input: &[u8]) {
+        let mut index = 0;
+        while index < input.len() {
+            if input[index].is_ascii_graphic() || input[index] == b' ' {
+                let start = index;
+                while index < input.len()
+                    && (input[index].is_ascii_graphic() || input[index] == b' ')
+                {
+                    index += 1;
+                }
+                self.grid.put_ascii_run(&input[start..index], self.style);
+                self.last_printed = char::from(input[index - 1]);
+                continue;
+            }
+
+            match input[index] {
+                b'\n' | 0x0b | 0x0c => {
+                    let _ = self.grid.put_char('\n', self.style);
+                }
+                b'\r' => {
+                    let _ = self.grid.move_cursor(0, self.grid.cursor().y);
+                }
+                b'\t' => self.grid.put_tab(self.style),
+                0x08 => {
+                    let cursor = self.grid.cursor();
+                    if cursor.x > 0 {
+                        let _ = self.grid.move_cursor(cursor.x - 1, cursor.y);
+                    }
+                }
+                0x20..=0x7e => {
+                    let ch = char::from(input[index]);
+                    let _ = self.grid.put_char(ch, self.style);
+                    self.last_printed = ch;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
     }
 
     fn apply_action(&mut self, action: ParserAction) {
@@ -290,6 +349,20 @@ where
     }
 }
 
+fn is_fast_ascii(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'\n' | b'\r' | b'\t' | 0x08 | 0x0b | 0x0c | 0x20..=0x7e
+    )
+}
+
+fn fast_ascii_prefix_len(input: &[u8]) -> usize {
+    input
+        .iter()
+        .position(|byte| !is_fast_ascii(*byte))
+        .unwrap_or(input.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +383,15 @@ mod tests {
         assert_eq!(terminal.grid().cell(0, 0).unwrap().ch, 'a');
         assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'b');
         assert!(!tick.damage.is_empty());
+    }
+
+    #[test]
+    fn fast_ascii_path_handles_plain_controls() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let _ = terminal.process_pty_input(b"ab\rc\nD");
+
+        assert_eq!(row_text(terminal.grid(), 0), "cb  ");
+        assert_eq!(row_text(terminal.grid(), 1), " D  ");
     }
 
     #[test]
@@ -392,6 +474,32 @@ mod tests {
         assert_eq!(terminal.grid().cell(1, 0).unwrap().ch, 'b');
         assert_eq!(terminal.grid().cell(0, 1).unwrap().ch, 'e');
         assert_eq!(terminal.grid().cell(1, 1).unwrap().ch, 'f');
+    }
+
+    #[test]
+    fn resize_reflow_wraps_existing_rows_to_new_width() {
+        let mut terminal = TerminalCore::new(6, 3);
+        let _ = terminal.process_pty_input(b"abcdef");
+
+        let _ = terminal.resize_reflow(3, 3);
+
+        assert_eq!(row_text(terminal.grid(), 0), "abc");
+        assert_eq!(row_text(terminal.grid(), 1), "def");
+        assert_eq!(row_text(terminal.grid(), 2), "   ");
+    }
+
+    #[test]
+    fn resize_reflow_moves_overflow_into_scrollback() {
+        let mut terminal = TerminalCore::new(6, 2);
+        let _ = terminal.process_pty_input(b"abcdef\x1b[2;1Hghijkl");
+
+        let _ = terminal.resize_reflow(3, 2);
+
+        assert_eq!(terminal.scrollback_len(), 2);
+        assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "abc");
+        assert_eq!(row_slice_text(terminal.scrollback_row(1).unwrap()), "def");
+        assert_eq!(row_text(terminal.grid(), 0), "ghi");
+        assert_eq!(row_text(terminal.grid(), 1), "jkl");
     }
 
     #[test]

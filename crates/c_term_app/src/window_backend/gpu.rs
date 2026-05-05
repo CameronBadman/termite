@@ -2,12 +2,12 @@ use std::{borrow::Cow, error::Error, sync::Arc};
 
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::plugins::{OverlayCommand, OverlayKind};
-
-use super::{
-    CELL_HEIGHT,
-    render_cache::{RowBand, ScrollDamage, TextureUpdate},
+use crate::{
+    plugins::{OverlayCommand, OverlayKind},
+    runner::TerminalMetrics,
 };
+
+use super::render_cache::{RowBand, ScrollDamage, TextureUpdate};
 
 const MAX_OVERLAYS: usize = 16;
 const OVERLAY_BYTES: usize = 64;
@@ -31,6 +31,7 @@ pub(super) struct GpuRenderer {
     scratch_texture: wgpu::Texture,
     texture_width: u32,
     texture_height: u32,
+    metrics: TerminalMetrics,
     cursor_buffer: wgpu::Buffer,
     overlay_buffer: wgpu::Buffer,
     overlay_bytes: [u8; MAX_OVERLAYS * OVERLAY_BYTES],
@@ -45,6 +46,7 @@ impl GpuRenderer {
         surface_size: PhysicalSize<u32>,
         texture_width: u32,
         texture_height: u32,
+        metrics: TerminalMetrics,
     ) -> Result<Self, Box<dyn Error>> {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window)?;
@@ -134,6 +136,7 @@ impl GpuRenderer {
             scratch_texture,
             texture_width,
             texture_height,
+            metrics,
             cursor_buffer,
             overlay_buffer,
             overlay_bytes: [0; MAX_OVERLAYS * OVERLAY_BYTES],
@@ -149,7 +152,8 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    pub(super) fn resize_texture(&mut self, width: u32, height: u32) {
+    pub(super) fn resize_texture(&mut self, width: u32, height: u32, metrics: TerminalMetrics) {
+        self.metrics = metrics;
         if width == self.texture_width && height == self.texture_height {
             return;
         }
@@ -260,8 +264,9 @@ impl GpuRenderer {
     fn write_row_bands(&self, frame: &[u8], rows: &[RowBand]) {
         let row_bytes = self.texture_width as usize * 4;
         for band in rows {
-            let start_px = u32::from(band.start) * CELL_HEIGHT;
-            let height_px = u32::from(band.end.saturating_sub(band.start)) * CELL_HEIGHT;
+            let start_px = u32::from(band.start) * self.metrics.cell_height;
+            let height_px =
+                u32::from(band.end.saturating_sub(band.start)) * self.metrics.cell_height;
             if height_px == 0 {
                 continue;
             }
@@ -313,9 +318,9 @@ impl GpuRenderer {
             if copy_rows == 0 {
                 continue;
             }
-            let top_px = u32::from(scroll.top) * CELL_HEIGHT;
-            let count_px = u32::from(count) * CELL_HEIGHT;
-            let copy_height = u32::from(copy_rows) * CELL_HEIGHT;
+            let top_px = u32::from(scroll.top) * self.metrics.cell_height;
+            let count_px = u32::from(count) * self.metrics.cell_height;
+            let copy_height = u32::from(copy_rows) * self.metrics.cell_height;
             let source_y = if scroll.down {
                 top_px
             } else {

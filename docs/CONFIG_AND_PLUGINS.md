@@ -14,6 +14,7 @@ The app starts from a `Runner`:
 pub(crate) fn runner() -> Runner {
     Runner::new()
         .with(terminal_font())
+        .with(terminal_metrics(TERMINAL_METRICS))
         .with(terminal_theme())
         .with(terminal_plugins())
 }
@@ -46,14 +47,39 @@ The current config supports:
 - bitmap cell rendering with `bitmap_font()`
 - TTF glyph rasterization with `font_file(path)`
 - TTF glyph rasterization with an explicit size through `font_file_with_size`
+- TTF fallback stacks with `font_files(paths)` and `font_files_with_size`
 
-The default config uses bitmap rendering:
+The default config uses TTF rendering with a fallback stack:
 
 ```rust
-const USE_TTF_FONT: bool = false;
+const USE_TTF_FONT: bool = true;
+const FONT_SIZE: f32 = 15.0;
 ```
 
-Switching `USE_TTF_FONT` to `true` uses the configured TTF path.
+The stack starts with Liberation Mono and then tries symbol/Nerd Font and common
+Noto/DejaVu mono fonts for characters the primary font does not cover.
+
+## Metrics And Zoom
+
+Cell metrics are configured explicitly:
+
+```rust
+const TERMINAL_METRICS: TerminalMetrics = TerminalMetrics {
+    cell_width: 10,
+    cell_height: 18,
+};
+```
+
+These metrics drive text rasterization, mouse hit-testing, selections, plugin
+overlays, cursor shape geometry, and GPU row uploads. Keeping them as one
+setting prevents visual and input coordinates from drifting apart.
+
+At runtime, `Ctrl+=`/`Ctrl++` zoom in, `Ctrl+-` zooms out, and `Ctrl+0` resets.
+Zoom rebuilds the font atlas/cache and resizes the terminal grid. On the primary
+screen, existing rows are reflowed to the new width so zooming in wraps text
+onto following rows. Alternate-screen programs keep coordinate resize behavior.
+Normal rendering still uses the current metrics directly without a per-cell
+config lookup.
 
 ## Theme
 

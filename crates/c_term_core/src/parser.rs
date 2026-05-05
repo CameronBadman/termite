@@ -35,6 +35,10 @@ pub enum ParserAction {
 
 pub trait ParserAdapter {
     fn parse(&mut self, input: &[u8], actions: &mut Vec<ParserAction>);
+
+    fn can_process_ascii_fast_path(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,10 @@ impl ParserAdapter for SimpleParser {
             use_g1: &mut self.use_g1,
         };
         self.parser.advance(&mut performer, input);
+    }
+
+    fn can_process_ascii_fast_path(&self) -> bool {
+        !self.use_g1 && !self.g0_line_drawing
     }
 }
 

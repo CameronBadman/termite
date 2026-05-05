@@ -1,8 +1,11 @@
 use c_term_core::{Cell, DamageBatch, DamageRegion, Grid, TerminalCore};
 
-use crate::{runner::FontConfig, theme::Theme};
+use crate::{
+    runner::{FontConfig, TerminalMetrics},
+    theme::Theme,
+};
 
-use super::{CELL_HEIGHT, CELL_WIDTH, text::TextRenderer};
+use super::text::TextRenderer;
 
 pub(super) struct RenderCache {
     pub(super) frame: Vec<u8>,
@@ -13,6 +16,7 @@ pub(super) struct RenderCache {
     upload_scrolls: Vec<ScrollDamage>,
     pub(super) dirty: bool,
     pub(super) scroll_start: Option<usize>,
+    metrics: TerminalMetrics,
     text: TextRenderer,
 }
 
@@ -47,7 +51,7 @@ impl TextureUpdate {
 }
 
 impl RenderCache {
-    pub(super) fn new(font: FontConfig, theme: Theme) -> Self {
+    pub(super) fn new(font: FontConfig, theme: Theme, metrics: TerminalMetrics) -> Self {
         Self {
             frame: Vec::new(),
             dirty_rows: Vec::new(),
@@ -57,12 +61,13 @@ impl RenderCache {
             upload_scrolls: Vec::new(),
             dirty: true,
             scroll_start: None,
-            text: TextRenderer::new(font, theme),
+            metrics,
+            text: TextRenderer::new(font, theme, metrics),
         }
     }
 
     pub(super) fn resize(&mut self, cols: u16, rows: u16) {
-        self.frame = vec![0; frame_len(cols, rows)];
+        self.frame = vec![0; frame_len(cols, rows, self.metrics)];
         self.dirty_rows = vec![false; usize::from(rows)];
         self.upload_rows = vec![false; usize::from(rows)];
         self.scrolls.clear();
@@ -138,7 +143,7 @@ impl RenderCache {
             .saturating_sub(scroll_offset.min(history_len));
 
         self.ensure_shape(cols, rows);
-        let width = usize::from(cols) * CELL_WIDTH as usize;
+        let width = usize::from(cols) * self.metrics.cell_width as usize;
         let previous = self.scroll_start;
 
         if self.dirty || previous.is_none() {
@@ -161,7 +166,7 @@ impl RenderCache {
             return &self.frame;
         }
 
-        let row_bytes = CELL_HEIGHT as usize * width * 4;
+        let row_bytes = self.metrics.cell_height as usize * width * 4;
         let delta = start as isize - previous as isize;
         let distance = delta.unsigned_abs();
         if distance >= height {
@@ -176,7 +181,7 @@ impl RenderCache {
             self.frame
                 .copy_within(distance * row_bytes..height * row_bytes, 0);
             for y in height - distance..height {
-                clear_grid_row(&mut self.frame, width, y as u16);
+                clear_grid_row(&mut self.frame, width, y as u16, self.metrics);
                 if let Some(row) = scrollback_row_at(terminal, start + y) {
                     self.text
                         .draw_row_to_frame(row, &mut self.frame, width, y as u16, cols);
@@ -186,7 +191,7 @@ impl RenderCache {
             self.frame
                 .copy_within(0..(height - distance) * row_bytes, distance * row_bytes);
             for y in 0..distance {
-                clear_grid_row(&mut self.frame, width, y as u16);
+                clear_grid_row(&mut self.frame, width, y as u16, self.metrics);
                 if let Some(row) = scrollback_row_at(terminal, start + y) {
                     self.text
                         .draw_row_to_frame(row, &mut self.frame, width, y as u16, cols);
@@ -207,7 +212,7 @@ impl RenderCache {
         rows: u16,
         mut row_at: impl FnMut(u16) -> Option<&'a [Cell]>,
     ) -> &[u8] {
-        let expected_len = frame_len(cols, rows);
+        let expected_len = frame_len(cols, rows, self.metrics);
         if self.frame.len() != expected_len {
             self.frame.resize(expected_len, 0);
             self.dirty = true;
@@ -223,7 +228,7 @@ impl RenderCache {
             self.upload_full = true;
         }
 
-        let width = usize::from(cols) * CELL_WIDTH as usize;
+        let width = usize::from(cols) * self.metrics.cell_width as usize;
         if self.dirty {
             self.frame.fill(0);
             for y in 0..rows {
@@ -250,7 +255,7 @@ impl RenderCache {
             if !*dirty {
                 continue;
             }
-            clear_grid_row(&mut self.frame, width, y);
+            clear_grid_row(&mut self.frame, width, y, self.metrics);
             if let Some(row) = row_at(y) {
                 self.text
                     .draw_row_to_frame(row, &mut self.frame, width, y, cols);
@@ -284,7 +289,7 @@ impl RenderCache {
                 continue;
             }
 
-            let row_bytes = CELL_HEIGHT as usize * width * 4;
+            let row_bytes = self.metrics.cell_height as usize * width * 4;
             let start = usize::from(top) * row_bytes;
             let end = (usize::from(bottom) + 1) * row_bytes;
             let count_bytes = usize::from(count) * row_bytes;
@@ -323,7 +328,7 @@ impl RenderCache {
         y: u16,
         row_at: &mut impl FnMut(u16) -> Option<&'a [Cell]>,
     ) {
-        clear_grid_row(&mut self.frame, width, y);
+        clear_grid_row(&mut self.frame, width, y, self.metrics);
         if let Some(row) = row_at(y) {
             self.text
                 .draw_row_to_frame(row, &mut self.frame, width, y, cols);
@@ -366,7 +371,7 @@ impl RenderCache {
     }
 
     fn ensure_shape(&mut self, cols: u16, rows: u16) {
-        let expected_len = frame_len(cols, rows);
+        let expected_len = frame_len(cols, rows, self.metrics);
         if self.frame.len() != expected_len {
             self.frame.resize(expected_len, 0);
             self.dirty = true;
@@ -384,8 +389,12 @@ impl RenderCache {
     }
 }
 
-pub(super) fn frame_len(cols: u16, rows: u16) -> usize {
-    usize::from(cols) * CELL_WIDTH as usize * usize::from(rows) * CELL_HEIGHT as usize * 4
+pub(super) fn frame_len(cols: u16, rows: u16, metrics: TerminalMetrics) -> usize {
+    usize::from(cols)
+        * metrics.cell_width as usize
+        * usize::from(rows)
+        * metrics.cell_height as usize
+        * 4
 }
 
 fn scrollback_row_at(terminal: &TerminalCore, row: usize) -> Option<&[Cell]> {
@@ -398,9 +407,9 @@ fn scrollback_row_at(terminal: &TerminalCore, row: usize) -> Option<&[Cell]> {
     }
 }
 
-fn clear_grid_row(frame: &mut [u8], width: usize, y: u16) {
-    let row_start = usize::from(y) * CELL_HEIGHT as usize * width * 4;
-    let row_len = CELL_HEIGHT as usize * width * 4;
+fn clear_grid_row(frame: &mut [u8], width: usize, y: u16, metrics: TerminalMetrics) {
+    let row_start = usize::from(y) * metrics.cell_height as usize * width * 4;
+    let row_len = metrics.cell_height as usize * width * 4;
     if let Some(row) = frame.get_mut(row_start..row_start + row_len) {
         row.fill(0);
     }
