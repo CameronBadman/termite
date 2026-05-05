@@ -1,6 +1,6 @@
 use std::{
     io::{self, Read},
-    sync::mpsc,
+    os::fd::{AsRawFd, RawFd},
     thread,
     time::{Duration, Instant},
 };
@@ -19,86 +19,107 @@ pub(super) enum UserEvent {
     ChildExited,
 }
 
-enum ReaderMessage {
-    Bytes(Vec<u8>),
-    Exited,
-}
-
 pub(super) fn spawn_pty_reader(
     child: &mut PtyChild,
     proxy: EventLoopProxy<UserEvent>,
 ) -> io::Result<()> {
     let mut reader = child.master.try_clone()?;
-    let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
+        let fd = reader.as_raw_fd();
         let mut buffer = [0_u8; READ_BUFFER_BYTES];
+        let mut batch = Vec::with_capacity(READ_BUFFER_BYTES);
         loop {
-            let n = match reader.read(&mut buffer) {
+            if batch.is_empty() {
+                match wait_readable(fd, None) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(_) => {
+                        let _ = proxy.send_event(UserEvent::ChildExited);
+                        break;
+                    }
+                }
+            }
+
+            match reader.read(&mut buffer) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(0) | Err(_) => {
-                    let _ = sender.send(ReaderMessage::Exited);
+                Err(_) | Ok(0) => {
+                    let _ = proxy.send_event(UserEvent::ChildExited);
                     break;
                 }
-                Ok(n) => n,
-            };
-            if sender
-                .send(ReaderMessage::Bytes(buffer[..n].to_vec()))
+                Ok(n) => batch.extend_from_slice(&buffer[..n]),
+            }
+
+            let deadline = Instant::now() + COALESCE_WINDOW;
+            while batch.len() < MAX_PTY_EVENT_BYTES {
+                match wait_readable(fd, Some(deadline.saturating_duration_since(Instant::now()))) {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(_) => {
+                        let _ = proxy.send_event(UserEvent::ChildExited);
+                        return;
+                    }
+                }
+
+                match reader.read(&mut buffer) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) | Ok(0) => {
+                        if !batch.is_empty()
+                            && proxy
+                                .send_event(UserEvent::PtyBytes(std::mem::take(&mut batch)))
+                                .is_err()
+                        {
+                            return;
+                        }
+                        let _ = proxy.send_event(UserEvent::ChildExited);
+                        return;
+                    }
+                    Ok(n) => {
+                        batch.extend_from_slice(&buffer[..n]);
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if proxy
+                .send_event(UserEvent::PtyBytes(std::mem::take(&mut batch)))
                 .is_err()
             {
                 break;
             }
         }
     });
-    thread::spawn(move || {
-        while let Ok(message) = receiver.recv() {
-            let mut batch = match message {
-                ReaderMessage::Bytes(bytes) => bytes,
-                ReaderMessage::Exited => {
-                    let _ = proxy.send_event(UserEvent::ChildExited);
-                    break;
+    Ok(())
+}
+
+fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> io::Result<bool> {
+    let timeout_ms = timeout.map_or(-1, duration_to_poll_timeout_ms);
+    loop {
+        let mut pollfd = nix::libc::pollfd {
+            fd,
+            events: nix::libc::POLLIN | nix::libc::POLLHUP | nix::libc::POLLERR,
+            revents: 0,
+        };
+        // SAFETY: poll receives a valid pointer to one pollfd for the duration of the call.
+        let result = unsafe { nix::libc::poll(&mut pollfd, 1, timeout_ms) };
+        match result {
+            0 => return Ok(false),
+            n if n > 0 => return Ok(true),
+            _ => {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
                 }
-            };
-            let mut exited = false;
-            let deadline = Instant::now() + COALESCE_WINDOW;
-            while batch.len() < MAX_PTY_EVENT_BYTES {
-                match receiver.try_recv() {
-                    Ok(ReaderMessage::Bytes(mut bytes)) => batch.append(&mut bytes),
-                    Ok(ReaderMessage::Exited) => {
-                        exited = true;
-                        break;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {
-                        let now = Instant::now();
-                        if now >= deadline {
-                            break;
-                        }
-                        match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
-                            Ok(ReaderMessage::Bytes(mut bytes)) => batch.append(&mut bytes),
-                            Ok(ReaderMessage::Exited) => {
-                                exited = true;
-                                break;
-                            }
-                            Err(mpsc::RecvTimeoutError::Timeout) => break,
-                            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                exited = true;
-                                break;
-                            }
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        exited = true;
-                        break;
-                    }
-                }
-            }
-            if proxy.send_event(UserEvent::PtyBytes(batch)).is_err() {
-                break;
-            }
-            if exited {
-                let _ = proxy.send_event(UserEvent::ChildExited);
-                break;
             }
         }
-    });
-    Ok(())
+    }
+}
+
+fn duration_to_poll_timeout_ms(duration: Duration) -> i32 {
+    if duration.is_zero() {
+        0
+    } else {
+        duration.as_millis().saturating_add(1).min(i32::MAX as u128) as i32
+    }
 }
