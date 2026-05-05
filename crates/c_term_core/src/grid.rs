@@ -281,6 +281,24 @@ impl Grid {
         }
     }
 
+    pub fn carriage_return_line_feed(&mut self) {
+        let old = self.cursor;
+        self.pending_wrap = false;
+        self.cursor.x = 0;
+        if self.cursor.y == self.scroll_bottom {
+            self.scroll_up_region();
+        } else {
+            self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
+        }
+        if old != self.cursor {
+            self.generation += 1;
+            self.damage.mark(DamageRegion::Cursor {
+                old: Some((old.x, old.y)),
+                new: (self.cursor.x, self.cursor.y),
+            });
+        }
+    }
+
     pub fn move_cursor(&mut self, x: u16, y: u16) -> Option<(Cursor, Cursor)> {
         let new = Cursor {
             x: x.min(self.width.saturating_sub(1)),

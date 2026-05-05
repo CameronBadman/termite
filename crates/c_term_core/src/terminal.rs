@@ -173,6 +173,11 @@ where
             }
 
             match input[index] {
+                b'\r' if input.get(index + 1) == Some(&b'\n') => {
+                    self.grid.carriage_return_line_feed();
+                    index += 2;
+                    continue;
+                }
                 b'\n' | 0x0b | 0x0c => {
                     let _ = self.grid.put_char('\n', self.style);
                 }
@@ -220,8 +225,7 @@ where
                 let _ = self.grid.put_char('\n', self.style);
             }
             ParserAction::NextLine => {
-                let _ = self.grid.move_cursor(0, self.grid.cursor().y);
-                let _ = self.grid.put_char('\n', self.style);
+                self.grid.carriage_return_line_feed();
             }
             ParserAction::CarriageReturn => {
                 let _ = self.grid.move_cursor(0, self.grid.cursor().y);
