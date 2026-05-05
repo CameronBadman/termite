@@ -3,6 +3,8 @@ use std::ops::Range;
 use crate::{DamageRegion, DamageTracker, EraseMode, Generation};
 use unicode_width::UnicodeWidthChar;
 
+const SCROLLED_ROW_POOL_LIMIT: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     DefaultForeground,
@@ -80,6 +82,7 @@ pub struct Grid {
     wrap: bool,
     pending_wrap: bool,
     scrolled_rows: Vec<Vec<Cell>>,
+    scrolled_row_pool: Vec<Vec<Cell>>,
     wide_rows: Vec<bool>,
     generation: Generation,
     damage: DamageTracker,
@@ -107,6 +110,7 @@ impl Grid {
             wrap: true,
             pending_wrap: false,
             scrolled_rows: Vec::new(),
+            scrolled_row_pool: Vec::new(),
             wide_rows: vec![false; usize::from(height)],
             generation: 1,
             damage,
@@ -521,8 +525,10 @@ impl Grid {
         let visible_height = usize::from(height);
         let scroll_count = rows.len().saturating_sub(visible_height);
         if scroll_count > 0 {
-            self.scrolled_rows
-                .extend(rows[..scroll_count].iter().map(|row| scrollback_row(row)));
+            for row in &rows[..scroll_count] {
+                let buffer = self.scrolled_row_pool.pop();
+                self.scrolled_rows.push(scrollback_row(row, buffer));
+            }
         }
 
         self.width = width;
@@ -559,6 +565,16 @@ impl Grid {
 
     pub fn drain_scrolled_rows(&mut self) -> Vec<Vec<Cell>> {
         std::mem::take(&mut self.scrolled_rows)
+    }
+
+    pub fn recycle_scrolled_rows(&mut self, rows: impl IntoIterator<Item = Vec<Cell>>) {
+        for mut row in rows {
+            if self.scrolled_row_pool.len() >= SCROLLED_ROW_POOL_LIMIT {
+                return;
+            }
+            row.clear();
+            self.scrolled_row_pool.push(row);
+        }
     }
 
     pub fn invalidate(&mut self) {
@@ -656,8 +672,11 @@ impl Grid {
             let height = usize::from(self.height);
             for row in 0..count.min(height) {
                 let row_start = self.row_start(row as u16);
-                self.scrolled_rows
-                    .push(scrollback_row(&self.cells[row_start..row_start + width]));
+                let buffer = self.scrolled_row_pool.pop();
+                self.scrolled_rows.push(scrollback_row(
+                    &self.cells[row_start..row_start + width],
+                    buffer,
+                ));
             }
             self.row_offset = (self.row_offset + count) % height.max(1);
             for row in height.saturating_sub(count)..height {
@@ -962,8 +981,11 @@ fn blank_row(width: u16) -> Vec<Cell> {
     vec![Cell::default(); usize::from(width)]
 }
 
-fn scrollback_row(row: &[Cell]) -> Vec<Cell> {
-    row[..logical_row_end(row)].to_vec()
+fn scrollback_row(row: &[Cell], buffer: Option<Vec<Cell>>) -> Vec<Cell> {
+    let mut buffer = buffer.unwrap_or_default();
+    buffer.clear();
+    buffer.extend_from_slice(&row[..logical_row_end(row)]);
+    buffer
 }
 
 fn row_contains_wide_state(row: &[Cell]) -> bool {

@@ -372,9 +372,11 @@ where
     fn tick(&mut self) -> CoreTick {
         if self.alternate_grid.is_none() {
             let scrolled_rows = self.grid.drain_scrolled_rows();
-            self.append_scrollback_rows(scrolled_rows);
+            let recycled_rows = self.append_scrollback_rows(scrolled_rows);
+            self.grid.recycle_scrolled_rows(recycled_rows);
         } else {
-            let _ = self.grid.drain_scrolled_rows();
+            let scrolled_rows = self.grid.drain_scrolled_rows();
+            self.grid.recycle_scrolled_rows(scrolled_rows);
         }
 
         CoreTick {
@@ -384,16 +386,24 @@ where
         }
     }
 
-    fn append_scrollback_rows(&mut self, rows: Vec<Vec<crate::Cell>>) {
+    fn append_scrollback_rows(&mut self, rows: Vec<Vec<crate::Cell>>) -> Vec<Vec<crate::Cell>> {
+        let mut recycled_rows = Vec::new();
         if rows.is_empty() || self.scrollback_capacity == 0 {
-            return;
+            recycled_rows.extend(rows);
+            return recycled_rows;
         }
 
         if rows.len() >= self.scrollback_capacity {
             let keep_from = rows.len() - self.scrollback_capacity;
-            self.scrollback.clear();
-            self.scrollback.extend(rows.into_iter().skip(keep_from));
-            return;
+            recycled_rows.extend(self.scrollback.drain(..));
+            for (index, row) in rows.into_iter().enumerate() {
+                if index < keep_from {
+                    recycled_rows.push(row);
+                } else {
+                    self.scrollback.push_back(row);
+                }
+            }
+            return recycled_rows;
         }
 
         let overflow = self
@@ -402,9 +412,10 @@ where
             .saturating_add(rows.len())
             .saturating_sub(self.scrollback_capacity);
         if overflow > 0 {
-            self.scrollback.drain(..overflow);
+            recycled_rows.extend(self.scrollback.drain(..overflow));
         }
         self.scrollback.extend(rows);
+        recycled_rows
     }
 }
 
