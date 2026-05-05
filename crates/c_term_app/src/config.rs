@@ -9,12 +9,14 @@ use crate::{
 };
 
 const USE_TTF_FONT: bool = true;
-const FONT_SIZE: f32 = 15.0;
+const FONT_SIZE: f32 = 16.0;
 const TERMINAL_METRICS: TerminalMetrics = TerminalMetrics {
     cell_width: 10,
-    cell_height: 18,
+    cell_height: 20,
 };
 const TTF_FONT_PATHS: &[&str] = &[
+    "/usr/share/fonts/urw-fonts/NimbusMonoPS-Regular.otf",
+    "/usr/share/fonts/urw-fonts/NimbusMonoPS-Regular.ttf",
     "/usr/share/fonts/liberation-fonts/LiberationMono-Regular.ttf",
     "/usr/share/fonts/symbols-nerd-font/SymbolsNerdFontMono-Regular.ttf",
     "/usr/share/fonts/urw-fonts/StandardSymbolsPS.ttf",

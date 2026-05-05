@@ -12,6 +12,8 @@ use crate::{
     theme::Theme,
 };
 
+const GLYPH_ALPHA_BOOST: f32 = 1.18;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct GlyphKey {
     font: usize,
@@ -192,12 +194,8 @@ fn load_fonts(font: FontConfig) -> Vec<LoadedFont> {
 fn rasterize_glyph(font: &LoadedFont, ch: char, metrics: TerminalMetrics) -> GlyphBitmap {
     let scaled = font.font.as_scaled(font.scale);
     let glyph_id = scaled.glyph_id(ch);
-    let advance = scaled.h_advance(glyph_id);
-    let x = ((metrics.cell_width as f32 - advance) * 0.5)
-        .floor()
-        .max(-1.0);
     let baseline = ((metrics.cell_height as f32 - font.height) * 0.5 + font.ascent).round();
-    let glyph = glyph_id.with_scale_and_position(font.scale, point(x, baseline));
+    let glyph = glyph_id.with_scale_and_position(font.scale, point(0.0, baseline));
     let Some(outlined) = scaled.outline_glyph(glyph) else {
         return GlyphBitmap {
             left: 0,
@@ -209,6 +207,9 @@ fn rasterize_glyph(font: &LoadedFont, ch: char, metrics: TerminalMetrics) -> Gly
     };
 
     let bounds = outlined.px_bounds();
+    let advance = scaled.h_advance(glyph_id);
+    let x_offset = ((metrics.cell_width as f32 - advance) * 0.5).floor();
+    let ink_offset = ((advance - bounds.width()) * 0.5 - bounds.min.x).round();
     let width = bounds.width().max(0.0) as u16;
     let height = bounds.height().max(0.0) as u16;
     let mut alpha = vec![0; usize::from(width) * usize::from(height)];
@@ -216,12 +217,14 @@ fn rasterize_glyph(font: &LoadedFont, ch: char, metrics: TerminalMetrics) -> Gly
         let index =
             usize::try_from(y).unwrap_or(0) * usize::from(width) + usize::try_from(x).unwrap_or(0);
         if let Some(alpha) = alpha.get_mut(index) {
-            *alpha = coverage.mul_add(255.0, 0.5).clamp(0.0, 255.0) as u8;
+            *alpha = (coverage * GLYPH_ALPHA_BOOST)
+                .mul_add(255.0, 0.5)
+                .clamp(0.0, 255.0) as u8;
         }
     });
 
     GlyphBitmap {
-        left: bounds.min.x.floor() as i16,
+        left: (x_offset + ink_offset + bounds.min.x).floor() as i16,
         top: bounds.min.y.floor() as i16,
         width,
         height,
