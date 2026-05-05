@@ -193,6 +193,12 @@ where
                 let _ = self.grid.put_char(ch, self.style);
                 self.last_printed = ch;
             }
+            ParserAction::PrintAscii(bytes) => {
+                self.grid.put_ascii_run(&bytes, self.style);
+                if let Some(&last) = bytes.last() {
+                    self.last_printed = char::from(last);
+                }
+            }
             ParserAction::Repeat(count) => {
                 for _ in 0..count {
                     let _ = self.grid.put_char(self.last_printed, self.style);
@@ -585,7 +591,7 @@ mod tests {
         let _ = terminal.process_pty_input(b"ab\r\ncd\r\nef");
 
         assert_eq!(terminal.scrollback_len(), 1);
-        assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "ab ");
+        assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "ab");
     }
 
     #[test]

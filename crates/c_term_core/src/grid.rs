@@ -507,7 +507,7 @@ impl Grid {
         let scroll_count = rows.len().saturating_sub(visible_height);
         if scroll_count > 0 {
             self.scrolled_rows
-                .extend(rows[..scroll_count].iter().cloned());
+                .extend(rows[..scroll_count].iter().map(|row| scrollback_row(row)));
         }
 
         self.width = width;
@@ -641,7 +641,7 @@ impl Grid {
             for row in 0..count.min(height) {
                 let row_start = self.row_start(row as u16);
                 self.scrolled_rows
-                    .push(self.cells[row_start..row_start + width].to_vec());
+                    .push(scrollback_row(&self.cells[row_start..row_start + width]));
             }
             self.row_offset = (self.row_offset + count) % height.max(1);
             for row in height.saturating_sub(count)..height {
@@ -696,7 +696,7 @@ impl Grid {
     }
 
     fn mark_line_damage(&mut self, y: u16, x: u16, width: u16) {
-        self.generation += 1;
+        self.generation = self.generation.saturating_add(u64::from(width.max(1)));
         self.damage.mark(DamageRegion::Cells {
             x,
             y,
@@ -908,6 +908,10 @@ fn char_width(ch: char) -> u16 {
 
 fn blank_row(width: u16) -> Vec<Cell> {
     vec![Cell::default(); usize::from(width)]
+}
+
+fn scrollback_row(row: &[Cell]) -> Vec<Cell> {
+    row[..logical_row_end(row)].to_vec()
 }
 
 fn append_reflowed_row(

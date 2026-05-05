@@ -194,7 +194,8 @@ impl CursorTrail {
             return true;
         }
         let cells = u64::from(grid.width()) * u64::from(grid.height());
-        let threshold = (cells / 6).max(64);
+        let small_view_threshold = (cells / 2).clamp(2, 64);
+        let threshold = (cells / 6).max(small_view_threshold);
         grid.generation().saturating_sub(last_generation) > threshold
     }
 
