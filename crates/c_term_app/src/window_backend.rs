@@ -1,8 +1,10 @@
 use std::{
     env,
     error::Error,
+    fs,
     io::{Read, Write},
     os::fd::AsRawFd,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -24,7 +26,7 @@ use wl_clipboard_rs::{copy as wl_copy, paste as wl_paste};
 use crate::{PtyChild, set_pty_winsize, spawn_shell};
 use crate::{
     plugins::{PluginFrame, PluginHost},
-    runner::{FontConfig, Runner, TerminalMetrics},
+    runner::{FontConfig, Runner, TerminalMetrics, TextRenderConfig, ZoomConfig},
     theme::Theme,
 };
 
@@ -51,12 +53,14 @@ const DELAYED_RENDER_UPPER_NS: u64 = 4_000_000;
 const APP_SYNC_TIMEOUT_MS: u64 = 1_000;
 const INITIAL_WIDTH: u32 = 960;
 const INITIAL_HEIGHT: u32 = 540;
+const MIN_ZOOM_STEPS: i16 = -4;
+const MAX_ZOOM_STEPS: i16 = 8;
 
 pub(crate) fn run(runner: Runner) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let (shell, plugins, font, metrics, theme) = runner.into_parts();
+    let (shell, plugins, font, metrics, theme, zoom, text_render) = runner.into_parts();
     let mut state = WindowBackend::new(
         shell,
         event_loop.create_proxy(),
@@ -64,6 +68,8 @@ pub(crate) fn run(runner: Runner) -> Result<(), Box<dyn Error>> {
         font,
         metrics,
         theme,
+        zoom,
+        text_render,
     );
     event_loop.run_app(&mut state)?;
     Ok(())
@@ -85,6 +91,9 @@ struct WindowBackend {
     metrics: TerminalMetrics,
     base_metrics: TerminalMetrics,
     zoom_steps: i16,
+    default_zoom_steps: i16,
+    persist_zoom: bool,
+    text_render: TextRenderConfig,
     theme: Theme,
     render_cache: RenderCache,
     selection: Option<Selection>,
@@ -109,7 +118,18 @@ impl WindowBackend {
         font: FontConfig,
         metrics: TerminalMetrics,
         theme: Theme,
+        zoom: ZoomConfig,
+        text_render: TextRenderConfig,
     ) -> Self {
+        let base_metrics = metrics;
+        let default_zoom_steps = normalize_zoom_steps(zoom.default_steps);
+        let zoom_steps = if zoom.persist {
+            load_zoom_steps().unwrap_or(default_zoom_steps)
+        } else {
+            default_zoom_steps
+        };
+        let metrics = scaled_metrics(base_metrics, zoom_steps);
+        let scaled_font = scaled_font(&font, zoom_steps);
         Self {
             shell,
             proxy,
@@ -121,13 +141,16 @@ impl WindowBackend {
             modifiers: ModifiersState::empty(),
             cols: 1,
             rows: 1,
-            font: font.clone(),
+            font: scaled_font.clone(),
             base_font: font.clone(),
             metrics,
-            base_metrics: metrics,
-            zoom_steps: 0,
+            base_metrics,
+            zoom_steps,
+            default_zoom_steps,
+            persist_zoom: zoom.persist,
+            text_render,
             theme,
-            render_cache: RenderCache::new(font, theme, metrics),
+            render_cache: RenderCache::new(scaled_font, theme, metrics, text_render),
             selection: None,
             mouse_buttons: 0,
             mouse_position: None,
@@ -355,26 +378,41 @@ impl WindowBackend {
     }
 
     fn adjust_zoom(&mut self, delta: i16) {
-        let next = (self.zoom_steps + delta).clamp(-4, 8);
+        let next = normalize_zoom_steps(self.zoom_steps + delta);
         if next == self.zoom_steps {
             return;
         }
         self.zoom_steps = next;
+        self.store_zoom();
         self.apply_zoom();
     }
 
     fn reset_zoom(&mut self) {
-        if self.zoom_steps == 0 {
+        if self.zoom_steps == self.default_zoom_steps {
             return;
         }
-        self.zoom_steps = 0;
+        self.zoom_steps = self.default_zoom_steps;
+        self.store_zoom();
         self.apply_zoom();
+    }
+
+    fn store_zoom(&self) {
+        if self.persist_zoom
+            && let Err(error) = store_zoom_steps(self.zoom_steps)
+        {
+            eprintln!("c-term: failed to persist zoom setting: {error}");
+        }
     }
 
     fn apply_zoom(&mut self) {
         self.metrics = scaled_metrics(self.base_metrics, self.zoom_steps);
         self.font = scaled_font(&self.base_font, self.zoom_steps);
-        self.render_cache = RenderCache::new(self.font.clone(), self.theme, self.metrics);
+        self.render_cache = RenderCache::new(
+            self.font.clone(),
+            self.theme,
+            self.metrics,
+            self.text_render,
+        );
 
         let Some(window) = &self.window else {
             return;
@@ -1007,6 +1045,45 @@ fn scaled_font(font: &FontConfig, zoom_steps: i16) -> FontConfig {
     }
 }
 
+fn normalize_zoom_steps(steps: i16) -> i16 {
+    steps.clamp(MIN_ZOOM_STEPS, MAX_ZOOM_STEPS)
+}
+
+fn load_zoom_steps() -> Option<i16> {
+    let text = fs::read_to_string(zoom_state_path()).ok()?;
+    parse_zoom_steps(&text)
+}
+
+fn store_zoom_steps(steps: i16) -> std::io::Result<()> {
+    let path = zoom_state_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, normalize_zoom_steps(steps).to_string())
+}
+
+fn parse_zoom_steps(text: &str) -> Option<i16> {
+    text.trim().parse::<i16>().ok().map(normalize_zoom_steps)
+}
+
+fn zoom_state_path() -> PathBuf {
+    if let Some(state_home) = env::var_os("XDG_STATE_HOME")
+        && !state_home.is_empty()
+    {
+        return PathBuf::from(state_home).join("termite").join("zoom");
+    }
+    if let Some(home) = env::var_os("HOME")
+        && !home.is_empty()
+    {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("termite")
+            .join("zoom");
+    }
+    PathBuf::from(".termite-zoom")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ZoomAction {
     Adjust(i16),
@@ -1220,6 +1297,14 @@ mod tests {
     }
 
     #[test]
+    fn zoom_steps_are_clamped_for_config_and_state() {
+        assert_eq!(parse_zoom_steps("3\n"), Some(3));
+        assert_eq!(parse_zoom_steps("99"), Some(MAX_ZOOM_STEPS));
+        assert_eq!(parse_zoom_steps("-99"), Some(MIN_ZOOM_STEPS));
+        assert_eq!(parse_zoom_steps("not zoom"), None);
+    }
+
+    #[test]
     fn shifted_minus_character_is_zoom_out_key() {
         assert_eq!(
             zoom_key_action(
@@ -1235,7 +1320,12 @@ mod tests {
         let mut terminal = TerminalCore::new(4, 2);
         let _ = terminal.process_pty_input(b"A\x1b[2;1HB");
         let metrics = TerminalMetrics::default();
-        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default(), metrics);
+        let mut cache = RenderCache::new(
+            FontConfig::Bitmap8x8,
+            Theme::default(),
+            metrics,
+            TextRenderConfig::default(),
+        );
 
         let frame = cache.update(terminal.grid());
         let first_row =
@@ -1257,7 +1347,12 @@ mod tests {
         let _ = terminal.process_pty_input(b"ab\r\ncd\r\nef");
         let _ = terminal.resize(5, 2);
         let metrics = TerminalMetrics::default();
-        let mut cache = RenderCache::new(FontConfig::Bitmap8x8, Theme::default(), metrics);
+        let mut cache = RenderCache::new(
+            FontConfig::Bitmap8x8,
+            Theme::default(),
+            metrics,
+            TextRenderConfig::default(),
+        );
 
         let frame = cache.update_scrollback(&terminal, 1);
 
@@ -1272,6 +1367,7 @@ mod tests {
             FontConfig::Bitmap8x8,
             Theme::default(),
             TerminalMetrics::default(),
+            TextRenderConfig::default(),
         );
 
         let _ = cache.update_scrollback(&terminal, 1);

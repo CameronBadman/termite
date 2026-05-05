@@ -159,7 +159,7 @@ fn selection_rect(
     OverlayCommand {
         kind: OverlayKind::Rect,
         color,
-        alpha: 96,
+        alpha: 64,
         corners: [
             (right as f32, top as f32),
             (right as f32, bottom as f32),

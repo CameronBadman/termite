@@ -98,12 +98,7 @@ impl GpuRenderer {
             cache: None,
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("c-term nearest sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
+        let sampler = create_frame_sampler(&device);
         let cursor_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("c-term global uniform"),
             size: 32,
@@ -157,12 +152,7 @@ impl GpuRenderer {
         if width == self.texture_width && height == self.texture_height {
             return;
         }
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("c-term nearest sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
+        let sampler = create_frame_sampler(&self.device);
         let texture = create_frame_texture(&self.device, width, height);
         let scratch_texture = create_scratch_texture(&self.device, width, height);
         let bind_group = create_frame_bind_group(
@@ -453,6 +443,15 @@ fn create_frame_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
     })
 }
 
+fn create_frame_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("c-term frame sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    })
+}
+
 fn create_scratch_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("c-term scroll scratch texture"),
@@ -645,9 +644,15 @@ fn overlay_alpha(point: vec2<f32>, overlay: Overlay) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    var color = textureSample(frame_texture, frame_sampler, in.uv);
-    let dims = vec2<f32>(textureDimensions(frame_texture));
-    let pixel = in.uv * dims;
+    let dims = textureDimensions(frame_texture);
+    let texel = vec2<i32>(in.position.xy);
+    if (texel.x < 0 || texel.y < 0 || texel.x >= i32(dims.x) || texel.y >= i32(dims.y)) {
+        return vec4<f32>(0.0);
+    }
+
+    let uv = (vec2<f32>(texel) + vec2<f32>(0.5, 0.5)) / vec2<f32>(dims);
+    var color = textureSampleLevel(frame_texture, frame_sampler, uv, 0.0);
+    let pixel = vec2<f32>(texel);
     let count = min(u32(globals.overlay.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let overlay = overlays[i];

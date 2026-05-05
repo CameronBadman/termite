@@ -1,7 +1,7 @@
 use c_term_core::{Cell, DamageBatch, DamageRegion, Grid, TerminalCore};
 
 use crate::{
-    runner::{FontConfig, TerminalMetrics},
+    runner::{FontConfig, TerminalMetrics, TextRenderConfig},
     theme::Theme,
 };
 
@@ -51,7 +51,12 @@ impl TextureUpdate {
 }
 
 impl RenderCache {
-    pub(super) fn new(font: FontConfig, theme: Theme, metrics: TerminalMetrics) -> Self {
+    pub(super) fn new(
+        font: FontConfig,
+        theme: Theme,
+        metrics: TerminalMetrics,
+        text_render: TextRenderConfig,
+    ) -> Self {
         Self {
             frame: Vec::new(),
             dirty_rows: Vec::new(),
@@ -62,7 +67,7 @@ impl RenderCache {
             dirty: true,
             scroll_start: None,
             metrics,
-            text: TextRenderer::new(font, theme, metrics),
+            text: TextRenderer::new(font, theme, metrics, text_render),
         }
     }
 

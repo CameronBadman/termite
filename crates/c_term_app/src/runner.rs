@@ -20,6 +20,60 @@ pub(crate) struct TerminalMetrics {
     pub(crate) cell_height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ZoomConfig {
+    pub(crate) default_steps: i16,
+    pub(crate) persist: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TextRenderConfig {
+    pub(crate) text_weight: f32,
+    pub(crate) symbol_weight: f32,
+    pub(crate) text_gamma: f32,
+    pub(crate) symbol_gamma: f32,
+}
+
+impl Default for TextRenderConfig {
+    fn default() -> Self {
+        Self {
+            text_weight: 1.0,
+            symbol_weight: 1.0,
+            text_gamma: 1.0,
+            symbol_gamma: 1.0,
+        }
+    }
+}
+
+impl TextRenderConfig {
+    fn normalized(self) -> Self {
+        Self {
+            text_weight: self.text_weight.clamp(0.75, 1.35),
+            symbol_weight: self.symbol_weight.clamp(0.75, 1.2),
+            text_gamma: self.text_gamma.clamp(0.75, 1.25),
+            symbol_gamma: self.symbol_gamma.clamp(0.75, 1.25),
+        }
+    }
+}
+
+impl Default for ZoomConfig {
+    fn default() -> Self {
+        Self {
+            default_steps: 0,
+            persist: true,
+        }
+    }
+}
+
+impl ZoomConfig {
+    fn normalized(self) -> Self {
+        Self {
+            default_steps: self.default_steps.clamp(-4, 8),
+            persist: self.persist,
+        }
+    }
+}
+
 impl Default for TerminalMetrics {
     fn default() -> Self {
         Self {
@@ -44,6 +98,8 @@ pub(crate) struct Runner {
     font: FontConfig,
     metrics: TerminalMetrics,
     theme: Theme,
+    zoom: ZoomConfig,
+    text_render: TextRenderConfig,
 }
 
 impl Runner {
@@ -54,6 +110,8 @@ impl Runner {
             font: FontConfig::default(),
             metrics: TerminalMetrics::default(),
             theme: Theme::default(),
+            zoom: ZoomConfig::default(),
+            text_render: TextRenderConfig::default(),
         }
     }
 
@@ -66,13 +124,25 @@ impl Runner {
         window_backend::run(self)
     }
 
-    pub(crate) fn into_parts(self) -> (String, PluginHost, FontConfig, TerminalMetrics, Theme) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        String,
+        PluginHost,
+        FontConfig,
+        TerminalMetrics,
+        Theme,
+        ZoomConfig,
+        TextRenderConfig,
+    ) {
         (
             self.shell,
             self.plugins,
             self.font,
             self.metrics,
             self.theme,
+            self.zoom,
+            self.text_render,
         )
     }
 
@@ -90,6 +160,14 @@ impl Runner {
 
     fn set_theme(&mut self, theme: Theme) {
         self.theme = theme;
+    }
+
+    fn set_zoom(&mut self, zoom: ZoomConfig) {
+        self.zoom = zoom.normalized();
+    }
+
+    fn set_text_render(&mut self, text_render: TextRenderConfig) {
+        self.text_render = text_render.normalized();
     }
 
     #[cfg(test)]
@@ -110,6 +188,16 @@ impl Runner {
     #[cfg(test)]
     pub(crate) fn theme(&self) -> Theme {
         self.theme
+    }
+
+    #[cfg(test)]
+    pub(crate) fn zoom(&self) -> ZoomConfig {
+        self.zoom
+    }
+
+    #[cfg(test)]
+    pub(crate) fn text_render(&self) -> TextRenderConfig {
+        self.text_render
     }
 }
 
@@ -184,6 +272,30 @@ pub(crate) struct ThemePart(Theme);
 impl RunnerPart for ThemePart {
     fn install(self, runner: &mut Runner) {
         runner.set_theme(self.0);
+    }
+}
+
+pub(crate) fn terminal_zoom(zoom: ZoomConfig) -> ZoomPart {
+    ZoomPart(zoom)
+}
+
+pub(crate) struct ZoomPart(ZoomConfig);
+
+impl RunnerPart for ZoomPart {
+    fn install(self, runner: &mut Runner) {
+        runner.set_zoom(self.0);
+    }
+}
+
+pub(crate) fn text_render(render: TextRenderConfig) -> TextRenderPart {
+    TextRenderPart(render)
+}
+
+pub(crate) struct TextRenderPart(TextRenderConfig);
+
+impl RunnerPart for TextRenderPart {
+    fn install(self, runner: &mut Runner) {
+        runner.set_text_render(self.0);
     }
 }
 

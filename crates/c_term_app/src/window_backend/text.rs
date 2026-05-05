@@ -8,23 +8,36 @@ use font8x8::{
 };
 
 use crate::{
-    runner::{FontConfig, TerminalMetrics},
+    runner::{FontConfig, TerminalMetrics, TextRenderConfig},
     theme::Theme,
 };
-
-const GLYPH_ALPHA_BOOST: f32 = 1.18;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct GlyphKey {
     font: usize,
     ch: char,
+    columns: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FontRole {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+impl FontRole {
+    fn is_bold(self) -> bool {
+        matches!(self, Self::Bold | Self::BoldItalic)
+    }
 }
 
 struct LoadedFont {
     font: FontArc,
+    role: FontRole,
+    symbol: bool,
     scale: PxScale,
-    ascent: f32,
-    height: f32,
 }
 
 struct GlyphBitmap {
@@ -39,6 +52,7 @@ pub(super) struct TextRenderer {
     fonts: Vec<LoadedFont>,
     glyphs: HashMap<GlyphKey, GlyphBitmap>,
     metrics: TerminalMetrics,
+    text_render: TextRenderConfig,
     theme: Theme,
 }
 
@@ -53,15 +67,22 @@ pub(super) struct CellPaint {
 struct GlyphPaint {
     color: [u8; 3],
     x_shift: i16,
-    metrics: TerminalMetrics,
+    origin_metrics: TerminalMetrics,
+    glyph_metrics: TerminalMetrics,
 }
 
 impl TextRenderer {
-    pub(super) fn new(font: FontConfig, theme: Theme, metrics: TerminalMetrics) -> Self {
+    pub(super) fn new(
+        font: FontConfig,
+        theme: Theme,
+        metrics: TerminalMetrics,
+        text_render: TextRenderConfig,
+    ) -> Self {
         Self {
             fonts: load_fonts(font),
             glyphs: HashMap::new(),
             metrics,
+            text_render,
             theme,
         }
     }
@@ -74,10 +95,51 @@ impl TextRenderer {
         y: u16,
         cols: u16,
     ) {
-        for x in 0..cols {
+        let mut x = 0;
+        while x < cols {
             let cell = row.get(usize::from(x)).copied().unwrap_or_default();
-            let ch = if cell.spacer { ' ' } else { cell.ch };
-            self.draw_cell(frame, width, x, y, ch, cell.style);
+            if cell.spacer {
+                let bg = self.theme.color(cell.style.background);
+                fill_cell(frame, width, x, y, bg, self.metrics);
+                x += 1;
+                continue;
+            }
+
+            let base_columns = if cell.wide && x + 1 < cols { 2 } else { 1 };
+            let columns = self.display_columns(row, x, cols, cell, base_columns);
+            self.draw_cell(frame, width, x, y, cell, columns);
+            x += columns;
+        }
+    }
+
+    fn display_columns(
+        &self,
+        row: &[Cell],
+        x: u16,
+        cols: u16,
+        cell: Cell,
+        base_columns: u16,
+    ) -> u16 {
+        if base_columns > 1 || !is_private_use_symbol(cell.ch) || x + 1 >= cols {
+            return base_columns;
+        }
+
+        let Some(key) = self.glyph_key(cell.ch, cell.style, base_columns) else {
+            return base_columns;
+        };
+        if !self.fonts[key.font].symbol {
+            return base_columns;
+        }
+
+        let next = row.get(usize::from(x + 1)).copied().unwrap_or_default();
+        if next.ch == ' '
+            && !next.wide
+            && !next.spacer
+            && next.style.background == cell.style.background
+        {
+            2
+        } else {
+            base_columns
         }
     }
 
@@ -87,9 +149,11 @@ impl TextRenderer {
         width: usize,
         cell_x: u16,
         cell_y: u16,
-        ch: char,
-        style: Style,
+        cell: Cell,
+        columns: u16,
     ) {
+        let ch = cell.ch;
+        let style = cell.style;
         let fg = self.theme.color(style.foreground);
         let bg = self.theme.color(style.background);
         let paint = CellPaint {
@@ -97,14 +161,16 @@ impl TextRenderer {
             bg,
             metrics: self.metrics,
         };
-        if draw_special_cell(frame, width, cell_x, cell_y, ch, paint) {
+        if columns == 1 && draw_special_cell(frame, width, cell_x, cell_y, ch, paint) {
             return;
         }
 
-        fill_cell(frame, width, cell_x, cell_y, bg, self.metrics);
+        fill_cell_span(frame, width, cell_x, cell_y, columns, bg, self.metrics);
         if ch != ' ' {
-            if let Some(key) = self.glyph_key(ch) {
-                self.ensure_glyph(key);
+            if let Some(key) = self.glyph_key(ch, style, columns) {
+                let synthetic_bold = style.bold && !self.fonts[key.font].role.is_bold();
+                let glyph_metrics = glyph_metrics(self.metrics, columns);
+                self.ensure_glyph(key, glyph_metrics);
                 if let Some(glyph) = self.glyphs.get(&key) {
                     draw_glyph_bitmap(
                         frame,
@@ -115,10 +181,11 @@ impl TextRenderer {
                         GlyphPaint {
                             color: fg,
                             x_shift: 0,
-                            metrics: self.metrics,
+                            origin_metrics: self.metrics,
+                            glyph_metrics,
                         },
                     );
-                    if style.bold {
+                    if synthetic_bold {
                         draw_glyph_bitmap(
                             frame,
                             width,
@@ -128,7 +195,8 @@ impl TextRenderer {
                             GlyphPaint {
                                 color: fg,
                                 x_shift: 1,
-                                metrics: self.metrics,
+                                origin_metrics: self.metrics,
+                                glyph_metrics,
                             },
                         );
                     }
@@ -138,32 +206,58 @@ impl TextRenderer {
             }
         }
         if style.underline {
-            draw_underline(frame, width, cell_x, cell_y, fg, self.metrics);
+            draw_underline_span(frame, width, cell_x, cell_y, columns, fg, self.metrics);
         }
     }
 
-    fn glyph_key(&self, ch: char) -> Option<GlyphKey> {
-        self.font_index(ch)
-            .map(|font| GlyphKey { font, ch })
+    fn glyph_key(&self, ch: char, style: Style, columns: u16) -> Option<GlyphKey> {
+        let columns = columns.min(u16::from(u8::MAX)) as u8;
+        self.font_index(ch, preferred_font_roles(style))
+            .map(|font| GlyphKey { font, ch, columns })
             .or_else(|| {
-                ascii_glyph_fallback(ch)
-                    .and_then(|ch| self.font_index(ch).map(|font| GlyphKey { font, ch }))
+                ascii_glyph_fallback(ch).and_then(|ch| {
+                    self.font_index(ch, preferred_font_roles(style))
+                        .map(|font| GlyphKey { font, ch, columns })
+                })
             })
-            .or_else(|| self.font_index('?').map(|font| GlyphKey { font, ch: '?' }))
+            .or_else(|| {
+                self.font_index('?', preferred_font_roles(style))
+                    .map(|font| GlyphKey {
+                        font,
+                        ch: '?',
+                        columns,
+                    })
+            })
     }
 
-    fn font_index(&self, ch: char) -> Option<usize> {
+    fn font_index(&self, ch: char, roles: &[FontRole]) -> Option<usize> {
+        for role in roles {
+            if let Some(index) = self
+                .fonts
+                .iter()
+                .position(|font| font.role == *role && font.font.glyph_id(ch) != GlyphId(0))
+            {
+                return Some(index);
+            }
+        }
         self.fonts
             .iter()
             .position(|font| font.font.glyph_id(ch) != GlyphId(0))
     }
 
-    fn ensure_glyph(&mut self, key: GlyphKey) {
+    fn ensure_glyph(&mut self, key: GlyphKey, metrics: TerminalMetrics) {
         if self.glyphs.contains_key(&key) {
             return;
         }
-        let glyph = rasterize_glyph(&self.fonts[key.font], key.ch, self.metrics);
+        let glyph = rasterize_glyph(&self.fonts[key.font], key.ch, metrics, self.text_render);
         self.glyphs.insert(key, glyph);
+    }
+}
+
+fn glyph_metrics(base: TerminalMetrics, columns: u16) -> TerminalMetrics {
+    TerminalMetrics {
+        cell_width: base.cell_width * u32::from(columns.max(1)),
+        cell_height: base.cell_height,
     }
 }
 
@@ -174,28 +268,71 @@ fn load_fonts(font: FontConfig) -> Vec<LoadedFont> {
 
     let mut loaded = Vec::new();
     for path in paths {
-        if let Ok(bytes) = fs::read(path)
+        let path = path;
+        if let Ok(bytes) = fs::read(&path)
             && let Ok(font) = FontArc::try_from_vec(bytes)
         {
-            let scaled = font.as_scaled(size);
-            let ascent = scaled.ascent();
-            let height = scaled.height();
             loaded.push(LoadedFont {
                 font,
+                role: font_role_from_path(&path),
+                symbol: is_symbol_font_path(&path),
                 scale: PxScale::from(size),
-                ascent,
-                height,
             });
         }
     }
     loaded
 }
 
-fn rasterize_glyph(font: &LoadedFont, ch: char, metrics: TerminalMetrics) -> GlyphBitmap {
-    let scaled = font.font.as_scaled(font.scale);
+fn preferred_font_roles(style: Style) -> &'static [FontRole] {
+    match (style.bold, style.italic) {
+        (true, true) => &[
+            FontRole::BoldItalic,
+            FontRole::Bold,
+            FontRole::Italic,
+            FontRole::Regular,
+        ],
+        (true, false) => &[FontRole::Bold, FontRole::BoldItalic, FontRole::Regular],
+        (false, true) => &[FontRole::Italic, FontRole::BoldItalic, FontRole::Regular],
+        (false, false) => &[FontRole::Regular],
+    }
+}
+
+fn font_role_from_path(path: &str) -> FontRole {
+    let lower = path.to_ascii_lowercase();
+    let bold = lower.contains("bold");
+    let italic = lower.contains("italic") || lower.contains("oblique");
+    match (bold, italic) {
+        (true, true) => FontRole::BoldItalic,
+        (true, false) => FontRole::Bold,
+        (false, true) => FontRole::Italic,
+        (false, false) => FontRole::Regular,
+    }
+}
+
+fn rasterize_glyph(
+    font: &LoadedFont,
+    ch: char,
+    metrics: TerminalMetrics,
+    render: TextRenderConfig,
+) -> GlyphBitmap {
+    rasterize_scaled_glyph(font, font.scale, ch, metrics, render)
+}
+
+fn rasterize_scaled_glyph(
+    font: &LoadedFont,
+    scale: PxScale,
+    ch: char,
+    metrics: TerminalMetrics,
+    render: TextRenderConfig,
+) -> GlyphBitmap {
+    let scaled = font.font.as_scaled(scale);
     let glyph_id = scaled.glyph_id(ch);
-    let baseline = ((metrics.cell_height as f32 - font.height) * 0.5 + font.ascent).round();
-    let glyph = glyph_id.with_scale_and_position(font.scale, point(0.0, baseline));
+    let advance = scaled.h_advance(glyph_id);
+    let x = ((metrics.cell_width as f32 - advance) * 0.5)
+        .floor()
+        .max(-1.0);
+    let baseline = ((metrics.cell_height as f32 - scaled.height()) * 0.5 + scaled.ascent()).round();
+    let glyph = glyph_id.with_scale_and_position(scale, point(x, baseline));
     let Some(outlined) = scaled.outline_glyph(glyph) else {
         return GlyphBitmap {
             left: 0,
@@ -207,9 +344,6 @@ fn rasterize_glyph(font: &LoadedFont, ch: char, metrics: TerminalMetrics) -> Gly
     };
 
     let bounds = outlined.px_bounds();
-    let advance = scaled.h_advance(glyph_id);
-    let x_offset = ((metrics.cell_width as f32 - advance) * 0.5).floor();
-    let ink_offset = ((advance - bounds.width()) * 0.5 - bounds.min.x).round();
     let width = bounds.width().max(0.0) as u16;
     let height = bounds.height().max(0.0) as u16;
     let mut alpha = vec![0; usize::from(width) * usize::from(height)];
@@ -217,19 +351,58 @@ fn rasterize_glyph(font: &LoadedFont, ch: char, metrics: TerminalMetrics) -> Gly
         let index =
             usize::try_from(y).unwrap_or(0) * usize::from(width) + usize::try_from(x).unwrap_or(0);
         if let Some(alpha) = alpha.get_mut(index) {
-            *alpha = (coverage * GLYPH_ALPHA_BOOST)
-                .mul_add(255.0, 0.5)
-                .clamp(0.0, 255.0) as u8;
+            let (weight, gamma) = if font.symbol {
+                (render.symbol_weight, render.symbol_gamma)
+            } else {
+                (render.text_weight, render.text_gamma)
+            };
+            let coverage = coverage.powf(gamma) * weight;
+            *alpha = coverage.mul_add(255.0, 0.5).clamp(0.0, 255.0) as u8;
         }
     });
 
+    let left = clamp_glyph_axis(
+        bounds.min.x.floor() as i16,
+        width,
+        metrics.cell_width as u16,
+    );
+    let top = clamp_glyph_axis(
+        bounds.min.y.floor() as i16,
+        height,
+        metrics.cell_height as u16,
+    );
+
     GlyphBitmap {
-        left: (x_offset + ink_offset + bounds.min.x).floor() as i16,
-        top: bounds.min.y.floor() as i16,
+        left,
+        top,
         width,
         height,
         alpha,
     }
+}
+
+fn clamp_glyph_axis(offset: i16, glyph_size: u16, cell_size: u16) -> i16 {
+    let glyph_size = glyph_size as i16;
+    let cell_size = cell_size as i16;
+    if glyph_size <= 0 || cell_size <= 0 {
+        return offset;
+    }
+    if glyph_size <= cell_size {
+        return offset.clamp(0, cell_size - glyph_size);
+    }
+    (cell_size - glyph_size) / 2
+}
+
+fn is_symbol_font_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("symbolsnerd")
+        || lower.contains("symbols-nerd")
+        || lower.contains("nerd-font")
+        || lower.contains("standardsymbols")
+}
+
+fn is_private_use_symbol(ch: char) -> bool {
+    matches!(ch as u32, 0xe000..=0xf8ff | 0xf0000..=0xffffd | 0x100000..=0x10fffd)
 }
 
 fn fill_cell(
@@ -250,6 +423,26 @@ fn fill_cell(
     }
 }
 
+fn fill_cell_span(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    columns: u16,
+    color: [u8; 3],
+    metrics: TerminalMetrics,
+) {
+    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
+    let pixel_width = metrics.cell_width as usize * usize::from(columns.max(1));
+    for py in 0..metrics.cell_height as usize {
+        for px in 0..pixel_width {
+            let index = ((origin_y + py) * width + origin_x + px) * 4;
+            frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
+        }
+    }
+}
+
 fn draw_glyph_bitmap(
     frame: &mut [u8],
     width: usize,
@@ -258,17 +451,18 @@ fn draw_glyph_bitmap(
     glyph: &GlyphBitmap,
     paint: GlyphPaint,
 ) {
-    let metrics = paint.metrics;
-    let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
-    let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
+    let origin_metrics = paint.origin_metrics;
+    let glyph_metrics = paint.glyph_metrics;
+    let origin_x = usize::from(cell_x) * origin_metrics.cell_width as usize;
+    let origin_y = usize::from(cell_y) * origin_metrics.cell_height as usize;
     for y in 0..glyph.height {
         let cell_py = glyph.top + y as i16;
-        if !(0..metrics.cell_height as i16).contains(&cell_py) {
+        if !(0..glyph_metrics.cell_height as i16).contains(&cell_py) {
             continue;
         }
         for x in 0..glyph.width {
             let cell_px = glyph.left + x as i16 + paint.x_shift;
-            if !(0..metrics.cell_width as i16).contains(&cell_px) {
+            if !(0..glyph_metrics.cell_width as i16).contains(&cell_px) {
                 continue;
             }
             let alpha = glyph.alpha[usize::from(y) * usize::from(glyph.width) + usize::from(x)];
@@ -345,18 +539,20 @@ pub(super) fn bitmap_glyph(ch: char) -> Option<[u8; 8]> {
         .or_else(|| SGA_FONTS.get(ch))
 }
 
-fn draw_underline(
+fn draw_underline_span(
     frame: &mut [u8],
     width: usize,
     cell_x: u16,
     cell_y: u16,
+    columns: u16,
     color: [u8; 3],
     metrics: TerminalMetrics,
 ) {
     let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
     let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
     let y = origin_y + metrics.cell_height as usize - 2;
-    for px in 0..metrics.cell_width as usize {
+    let pixel_width = metrics.cell_width as usize * usize::from(columns.max(1));
+    for px in 0..pixel_width {
         let index = (y * width + origin_x + px) * 4;
         frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
     }
