@@ -129,7 +129,7 @@ where
         if input.is_empty() {
             return self.tick();
         }
-        if self.parser.can_process_ascii_fast_path() {
+        while self.parser.can_process_ascii_fast_path() && !input.is_empty() {
             let prefix_len = fast_text_prefix_len(input);
             if prefix_len > 0 {
                 self.process_fast_text(&input[..prefix_len]);
@@ -137,7 +137,13 @@ where
                     return self.tick();
                 }
                 input = &input[prefix_len..];
+                continue;
             }
+            if let Some(sgr_len) = self.process_fast_sgr(input) {
+                input = &input[sgr_len..];
+                continue;
+            }
+            break;
         }
 
         let mut actions = std::mem::take(&mut self.actions);
@@ -149,6 +155,52 @@ where
         }
         self.actions = actions;
         self.tick()
+    }
+
+    fn process_fast_sgr(&mut self, input: &[u8]) -> Option<usize> {
+        let params = input.strip_prefix(b"\x1b[")?;
+        let end = params.iter().position(|byte| *byte == b'm')?;
+        if !params[..end]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || *byte == b';')
+        {
+            return None;
+        }
+
+        if end == 0 {
+            self.style = Style::default();
+            return Some(3);
+        }
+
+        for param in params[..end].split(|byte| *byte == b';') {
+            let code = if param.is_empty() {
+                0
+            } else {
+                parse_sgr_code(param)?
+            };
+            self.apply_fast_sgr_code(code)?;
+        }
+        Some(end + 3)
+    }
+
+    fn apply_fast_sgr_code(&mut self, code: u16) -> Option<()> {
+        match code {
+            0 => self.style = Style::default(),
+            1 => self.style.bold = true,
+            3 => self.style.italic = true,
+            4 => self.style.underline = true,
+            22 => self.style.bold = false,
+            23 => self.style.italic = false,
+            24 => self.style.underline = false,
+            30..=37 => self.style.foreground = crate::Color::Indexed((code - 30) as u8),
+            39 => self.style.foreground = crate::Color::DefaultForeground,
+            40..=47 => self.style.background = crate::Color::Indexed((code - 40) as u8),
+            49 => self.style.background = crate::Color::DefaultBackground,
+            90..=97 => self.style.foreground = crate::Color::Indexed((code - 90 + 8) as u8),
+            100..=107 => self.style.background = crate::Color::Indexed((code - 100 + 8) as u8),
+            _ => return None,
+        }
+        Some(())
     }
 
     fn process_fast_text(&mut self, input: &[u8]) {
@@ -459,6 +511,18 @@ fn decode_utf8_char(input: &[u8], index: usize) -> Option<char> {
     std::str::from_utf8(bytes).ok()?.chars().next()
 }
 
+fn parse_sgr_code(bytes: &[u8]) -> Option<u16> {
+    let mut value = 0u16;
+    for byte in bytes {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u16::from(digit))?;
+    }
+    Some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +561,22 @@ mod tests {
 
         assert_eq!(row_text(terminal.grid(), 0), "cbλπ  ");
         assert_eq!(row_text(terminal.grid(), 1), " ok   ");
+    }
+
+    #[test]
+    fn fast_sgr_path_resumes_fast_text_after_color_sequence() {
+        let mut terminal = TerminalCore::new(5, 1);
+        let _ = terminal.process_pty_input(b"\x1b[31mred\x1b[0m!");
+
+        assert_eq!(row_text(terminal.grid(), 0), "red! ");
+        assert_eq!(
+            terminal.grid().cell(0, 0).unwrap().style.foreground,
+            crate::Color::Indexed(1)
+        );
+        assert_eq!(
+            terminal.grid().cell(3, 0).unwrap().style.foreground,
+            crate::Color::DefaultForeground
+        );
     }
 
     #[test]
