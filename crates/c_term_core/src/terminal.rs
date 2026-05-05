@@ -130,9 +130,9 @@ where
             return self.tick();
         }
         if self.parser.can_process_ascii_fast_path() {
-            let prefix_len = fast_ascii_prefix_len(input);
+            let prefix_len = fast_text_prefix_len(input);
             if prefix_len > 0 {
-                self.process_fast_ascii(&input[..prefix_len]);
+                self.process_fast_text(&input[..prefix_len]);
                 if prefix_len == input.len() {
                     return self.tick();
                 }
@@ -151,7 +151,7 @@ where
         self.tick()
     }
 
-    fn process_fast_ascii(&mut self, input: &[u8]) {
+    fn process_fast_text(&mut self, input: &[u8]) {
         let mut index = 0;
         while index < input.len() {
             if input[index].is_ascii_graphic() || input[index] == b' ' {
@@ -163,6 +163,12 @@ where
                 }
                 self.grid.put_ascii_run(&input[start..index], self.style);
                 self.last_printed = char::from(input[index - 1]);
+                continue;
+            }
+            if let Some(ch) = decode_utf8_char(input, index) {
+                let _ = self.grid.put_char(ch, self.style);
+                self.last_printed = ch;
+                index += ch.len_utf8();
                 continue;
             }
 
@@ -409,11 +415,33 @@ fn is_fast_ascii(byte: u8) -> bool {
     )
 }
 
-fn fast_ascii_prefix_len(input: &[u8]) -> usize {
-    input
-        .iter()
-        .position(|byte| !is_fast_ascii(*byte))
-        .unwrap_or(input.len())
+fn fast_text_prefix_len(input: &[u8]) -> usize {
+    let mut index = 0;
+    while index < input.len() {
+        let byte = input[index];
+        if is_fast_ascii(byte) {
+            index += 1;
+        } else if let Some(ch) = decode_utf8_char(input, index)
+            && !ch.is_control()
+        {
+            index += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+fn decode_utf8_char(input: &[u8], index: usize) -> Option<char> {
+    let first = *input.get(index)?;
+    let len = match first {
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return None,
+    };
+    let bytes = input.get(index..index + len)?;
+    std::str::from_utf8(bytes).ok()?.chars().next()
 }
 
 #[cfg(test)]
@@ -445,6 +473,15 @@ mod tests {
 
         assert_eq!(row_text(terminal.grid(), 0), "cb  ");
         assert_eq!(row_text(terminal.grid(), 1), " D  ");
+    }
+
+    #[test]
+    fn fast_text_path_handles_utf8_and_plain_controls() {
+        let mut terminal = TerminalCore::new(6, 2);
+        let _ = terminal.process_pty_input("abλπ\rc\nok".as_bytes());
+
+        assert_eq!(row_text(terminal.grid(), 0), "cbλπ  ");
+        assert_eq!(row_text(terminal.grid(), 1), " ok   ");
     }
 
     #[test]
