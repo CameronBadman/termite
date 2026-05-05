@@ -212,21 +212,21 @@ impl TextRenderer {
 
     fn glyph_key(&self, ch: char, style: Style, columns: u16) -> Option<GlyphKey> {
         let columns = columns.min(u16::from(u8::MAX)) as u8;
-        self.font_index(ch, preferred_font_roles(style))
+        let roles = preferred_font_roles(style);
+        self.font_index(ch, roles)
             .map(|font| GlyphKey { font, ch, columns })
             .or_else(|| {
                 ascii_glyph_fallback(ch).and_then(|ch| {
-                    self.font_index(ch, preferred_font_roles(style))
+                    self.font_index(ch, roles)
                         .map(|font| GlyphKey { font, ch, columns })
                 })
             })
             .or_else(|| {
-                self.font_index('?', preferred_font_roles(style))
-                    .map(|font| GlyphKey {
-                        font,
-                        ch: '?',
-                        columns,
-                    })
+                self.font_index('?', roles).map(|font| GlyphKey {
+                    font,
+                    ch: '?',
+                    columns,
+                })
             })
     }
 
