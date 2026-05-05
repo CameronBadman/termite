@@ -46,6 +46,7 @@ pub struct TerminalCore<P = SimpleParser> {
     bracketed_paste: bool,
     clipboard: Vec<ClipboardStore>,
     output: Vec<u8>,
+    actions: Vec<ParserAction>,
 }
 
 impl TerminalCore<SimpleParser> {
@@ -72,6 +73,7 @@ where
             bracketed_paste: false,
             clipboard: Vec::new(),
             output: Vec::new(),
+            actions: Vec::new(),
         }
     }
 
@@ -138,12 +140,14 @@ where
             }
         }
 
-        let mut actions = Vec::new();
+        let mut actions = std::mem::take(&mut self.actions);
+        actions.clear();
         self.parser.parse(input, &mut actions);
 
-        for action in actions {
+        for action in actions.drain(..) {
             self.apply_action(action);
         }
+        self.actions = actions;
         self.tick()
     }
 
@@ -337,12 +341,8 @@ where
 
     fn tick(&mut self) -> CoreTick {
         if self.alternate_grid.is_none() {
-            for row in self.grid.drain_scrolled_rows() {
-                self.scrollback.push_back(row);
-                while self.scrollback.len() > self.scrollback_capacity {
-                    self.scrollback.pop_front();
-                }
-            }
+            let scrolled_rows = self.grid.drain_scrolled_rows();
+            self.append_scrollback_rows(scrolled_rows);
         } else {
             let _ = self.grid.drain_scrolled_rows();
         }
@@ -352,6 +352,29 @@ where
             output: std::mem::take(&mut self.output),
             clipboard: std::mem::take(&mut self.clipboard),
         }
+    }
+
+    fn append_scrollback_rows(&mut self, rows: Vec<Vec<crate::Cell>>) {
+        if rows.is_empty() || self.scrollback_capacity == 0 {
+            return;
+        }
+
+        if rows.len() >= self.scrollback_capacity {
+            let keep_from = rows.len() - self.scrollback_capacity;
+            self.scrollback.clear();
+            self.scrollback.extend(rows.into_iter().skip(keep_from));
+            return;
+        }
+
+        let overflow = self
+            .scrollback
+            .len()
+            .saturating_add(rows.len())
+            .saturating_sub(self.scrollback_capacity);
+        if overflow > 0 {
+            self.scrollback.drain(..overflow);
+        }
+        self.scrollback.extend(rows);
     }
 }
 
@@ -592,6 +615,17 @@ mod tests {
 
         assert_eq!(terminal.scrollback_len(), 1);
         assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "ab");
+    }
+
+    #[test]
+    fn scrollback_append_keeps_only_capacity_tail() {
+        let mut terminal = TerminalCore::new(3, 1);
+        terminal.scrollback_capacity = 2;
+        let _ = terminal.process_pty_input(b"aaa\r\nbbb\r\nccc\r\nddd");
+
+        assert_eq!(terminal.scrollback_len(), 2);
+        assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "bbb");
+        assert_eq!(row_slice_text(terminal.scrollback_row(1).unwrap()), "ccc");
     }
 
     #[test]
