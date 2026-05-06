@@ -12,7 +12,7 @@ const USE_TTF_FONT: bool = true;
 const DEFAULT_ZOOM_STEPS: i16 = 0;
 const PERSIST_ZOOM: bool = true;
 const FONT_SIZE: f32 = 17.4;
-const CELL_WIDTH_RATIO: f32 = 0.69;
+const CELL_WIDTH_RATIO: f32 = 0.46;
 const CELL_HEIGHT_RATIO: f32 = 1.32;
 const MIN_THEME_CONTRAST: f32 = 7.0;
 const ANSI_SATURATION: f32 = 1.28;
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(
             runner.metrics(),
             TerminalMetrics {
-                cell_width: 12,
+                cell_width: 8,
                 cell_height: 23,
             }
         );
