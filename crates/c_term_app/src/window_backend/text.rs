@@ -107,20 +107,33 @@ impl TextRenderer {
         y: u16,
         cols: u16,
     ) {
+        if cols == 0 {
+            return;
+        }
+
         let mut x = 0;
         while x < cols {
             let cell = row.get(usize::from(x)).copied().unwrap_or_default();
-            let bg = self.theme.color(cell.style.background);
-            if cell.spacer {
-                fill_cell(frame, width, x, y, bg, self.metrics);
-                x += 1;
-                continue;
+            let background = cell.style.background;
+            let mut end = x + 1;
+            while end < cols
+                && row
+                    .get(usize::from(end))
+                    .copied()
+                    .unwrap_or_default()
+                    .style
+                    .background
+                    == background
+            {
+                end += 1;
             }
-
-            let base_columns = if cell.wide && x + 1 < cols { 2 } else { 1 };
-            let columns = self.display_columns(row, x, cols, cell, base_columns);
-            fill_cell_span(frame, width, x, y, columns, bg, self.metrics);
-            x += columns;
+            let bg = self.theme.color(background);
+            if x == 0 && end == cols {
+                fill_row(frame, width, y, bg, self.metrics);
+            } else {
+                fill_cell_span(frame, width, x, y, end - x, bg, self.metrics);
+            }
+            x = end;
         }
     }
 
@@ -449,6 +462,16 @@ fn fill_cell(
         for px in 0..metrics.cell_width as usize {
             let index = ((origin_y + py) * width + origin_x + px) * 4;
             frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
+        }
+    }
+}
+
+fn fill_row(frame: &mut [u8], width: usize, y: u16, color: [u8; 3], metrics: TerminalMetrics) {
+    let row_start = usize::from(y) * metrics.cell_height as usize * width * 4;
+    let row_len = metrics.cell_height as usize * width * 4;
+    if let Some(row) = frame.get_mut(row_start..row_start + row_len) {
+        for pixel in row.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[color[0], color[1], color[2], 0xff]);
         }
     }
 }
