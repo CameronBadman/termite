@@ -73,6 +73,7 @@ fn terminal_theme() -> impl RunnerPart {
     theme(Theme {
         foreground: THEME_FOREGROUND,
         background: THEME_BACKGROUND,
+        cursor: KITTY_CURSOR,
         ansi: THEME_ANSI,
     })
 }
@@ -207,6 +208,7 @@ mod tests {
 
         assert_eq!(runner.theme().foreground, [205, 214, 244]);
         assert_eq!(runner.theme().background, [30, 30, 46]);
+        assert_eq!(runner.theme().cursor, [245, 224, 220]);
         assert_eq!(runner.theme().ansi[1], [243, 139, 168]);
         assert_eq!(runner.theme().ansi[15], [166, 173, 200]);
     }

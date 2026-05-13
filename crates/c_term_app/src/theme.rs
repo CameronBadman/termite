@@ -4,6 +4,7 @@ use c_term_core::Color;
 pub(crate) struct Theme {
     pub(crate) foreground: [u8; 3],
     pub(crate) background: [u8; 3],
+    pub(crate) cursor: [u8; 3],
     pub(crate) ansi: [[u8; 3]; 16],
 }
 
@@ -12,6 +13,7 @@ impl Default for Theme {
         Self {
             foreground: [220, 224, 232],
             background: [16, 18, 24],
+            cursor: [245, 224, 220],
             ansi: [
                 [12, 12, 12],
                 [197, 15, 31],

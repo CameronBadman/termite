@@ -33,6 +33,7 @@ pub(super) struct GpuRenderer {
     texture_height: u32,
     metrics: TerminalMetrics,
     background: [u8; 3],
+    cursor_color: [u8; 3],
     cursor_buffer: wgpu::Buffer,
     overlay_buffer: wgpu::Buffer,
     overlay_bytes: [u8; MAX_OVERLAYS * OVERLAY_BYTES],
@@ -49,6 +50,7 @@ impl GpuRenderer {
         texture_height: u32,
         metrics: TerminalMetrics,
         background: [u8; 3],
+        cursor_color: [u8; 3],
     ) -> Result<Self, Box<dyn Error>> {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window)?;
@@ -102,7 +104,7 @@ impl GpuRenderer {
 
         let cursor_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("c-term global uniform"),
-            size: 48,
+            size: 64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
@@ -133,6 +135,7 @@ impl GpuRenderer {
             texture_height,
             metrics,
             background,
+            cursor_color,
             cursor_buffer,
             overlay_buffer,
             overlay_bytes: [0; MAX_OVERLAYS * OVERLAY_BYTES],
@@ -206,7 +209,7 @@ impl GpuRenderer {
         screen_opacity: f32,
         premultiply_alpha: bool,
     ) {
-        let mut bytes = [0_u8; 48];
+        let mut bytes = [0_u8; 64];
         for (chunk, value) in bytes[..16].chunks_exact_mut(4).zip(cursor) {
             chunk.copy_from_slice(&value.to_ne_bytes());
         }
@@ -217,6 +220,10 @@ impl GpuRenderer {
         bytes[36..40].copy_from_slice(&(f32::from(self.background[1]) / 255.0).to_ne_bytes());
         bytes[40..44].copy_from_slice(&(f32::from(self.background[2]) / 255.0).to_ne_bytes());
         bytes[44..48].copy_from_slice(&1.0_f32.to_ne_bytes());
+        bytes[48..52].copy_from_slice(&(f32::from(self.cursor_color[0]) / 255.0).to_ne_bytes());
+        bytes[52..56].copy_from_slice(&(f32::from(self.cursor_color[1]) / 255.0).to_ne_bytes());
+        bytes[56..60].copy_from_slice(&(f32::from(self.cursor_color[2]) / 255.0).to_ne_bytes());
+        bytes[60..64].copy_from_slice(&1.0_f32.to_ne_bytes());
         self.queue.write_buffer(&self.cursor_buffer, 0, &bytes);
     }
 
@@ -526,6 +533,7 @@ struct Globals {
     rect: vec4<f32>,
     overlay: vec4<f32>,
     background: vec4<f32>,
+    cursor: vec4<f32>,
 };
 
 struct Overlay {
@@ -676,7 +684,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (rect.z > 0.0 &&
         pixel.x >= rect.x && pixel.x < rect.x + rect.z &&
         pixel.y >= rect.y && pixel.y < rect.y + rect.w) {
-        color = vec4<f32>(vec3<f32>(1.0) - color.rgb, color.a);
+        color = vec4<f32>(srgb_to_linear(globals.cursor.rgb), color.a);
     }
     color = vec4<f32>(color.rgb, color.a * screen_alpha);
     return output_color(color);

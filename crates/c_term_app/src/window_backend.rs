@@ -190,6 +190,7 @@ impl WindowBackend {
             buffer_height(rows, self.metrics),
             self.metrics,
             self.theme.background,
+            self.theme.cursor,
         )?;
         let mut child = spawn_shell(&self.shell, cols, rows)?;
         spawn_pty_reader(&mut child, self.proxy.clone())?;
