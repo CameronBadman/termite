@@ -318,10 +318,9 @@ impl CursorTrail {
 
         let edge = lift_color(self.color, 1.25, 28);
         let hot = lift_color(self.color, 1.8, 64);
-        frame.overlay_quad(self.corners, [4, 8, 12], 82);
-        frame.overlay_quad_ring(self.corners, edge, 235);
-        frame.overlay_quad(self.corners, self.color, 205);
-        frame.overlay_quad_ring(self.corners, hot, 132);
+        frame.overlay_quad(self.corners, self.color, 178);
+        frame.overlay_quad_ring(self.corners, edge, 215);
+        frame.overlay_quad_ring(self.corners, hot, 112);
     }
 }
 
@@ -683,6 +682,51 @@ mod tests {
                     .0
         );
         assert!(plugin.needs_render);
+    }
+
+    #[test]
+    fn cursor_trail_uses_accent_overlays_without_dark_flash() {
+        let config = trail_config();
+        let terminal = TerminalCore::new(4, 1);
+        let theme = Theme::default();
+        let mut plugin = CursorTrail::new(config);
+        let start = Instant::now();
+        plugin.snap_to_cursor(
+            terminal.grid(),
+            theme,
+            TerminalMetrics::default(),
+            Cursor {
+                x: 0,
+                y: 0,
+                visible: true,
+                shape: CursorShape::Block,
+            },
+            start,
+        );
+        plugin.set_target(
+            terminal.grid(),
+            theme,
+            TerminalMetrics::default(),
+            Cursor {
+                x: 3,
+                y: 0,
+                visible: true,
+                shape: CursorShape::Block,
+            },
+            start,
+        );
+
+        let mut frame = frame_for(&terminal, &theme, start);
+        plugin.draw_trail(&mut frame);
+
+        assert_eq!(frame.overlays.len(), 3);
+        assert_eq!(frame.overlays[0].color, [255, 0, 0]);
+        assert!(
+            !frame
+                .overlays
+                .iter()
+                .any(|overlay| overlay.color == [4, 8, 12])
+        );
     }
 
     #[test]
