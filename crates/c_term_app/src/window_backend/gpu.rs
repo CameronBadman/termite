@@ -32,6 +32,7 @@ pub(super) struct GpuRenderer {
     texture_width: u32,
     texture_height: u32,
     metrics: TerminalMetrics,
+    background: [u8; 3],
     cursor_buffer: wgpu::Buffer,
     overlay_buffer: wgpu::Buffer,
     overlay_bytes: [u8; MAX_OVERLAYS * OVERLAY_BYTES],
@@ -47,6 +48,7 @@ impl GpuRenderer {
         texture_width: u32,
         texture_height: u32,
         metrics: TerminalMetrics,
+        background: [u8; 3],
     ) -> Result<Self, Box<dyn Error>> {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window)?;
@@ -98,10 +100,9 @@ impl GpuRenderer {
             cache: None,
         });
 
-        let sampler = create_frame_sampler(&device);
         let cursor_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("c-term global uniform"),
-            size: 32,
+            size: 48,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
@@ -116,7 +117,6 @@ impl GpuRenderer {
         let bind_group = create_frame_bind_group(
             &device,
             &pipeline,
-            &sampler,
             &texture,
             &cursor_buffer,
             &overlay_buffer,
@@ -132,6 +132,7 @@ impl GpuRenderer {
             texture_width,
             texture_height,
             metrics,
+            background,
             cursor_buffer,
             overlay_buffer,
             overlay_bytes: [0; MAX_OVERLAYS * OVERLAY_BYTES],
@@ -152,13 +153,11 @@ impl GpuRenderer {
         if width == self.texture_width && height == self.texture_height {
             return;
         }
-        let sampler = create_frame_sampler(&self.device);
         let texture = create_frame_texture(&self.device, width, height);
         let scratch_texture = create_scratch_texture(&self.device, width, height);
         let bind_group = create_frame_bind_group(
             &self.device,
             &self.pipeline,
-            &sampler,
             &texture,
             &self.cursor_buffer,
             &self.overlay_buffer,
@@ -207,13 +206,17 @@ impl GpuRenderer {
         screen_opacity: f32,
         premultiply_alpha: bool,
     ) {
-        let mut bytes = [0_u8; 32];
+        let mut bytes = [0_u8; 48];
         for (chunk, value) in bytes[..16].chunks_exact_mut(4).zip(cursor) {
             chunk.copy_from_slice(&value.to_ne_bytes());
         }
         bytes[16..20].copy_from_slice(&(overlay_count as f32).to_ne_bytes());
         bytes[20..24].copy_from_slice(&screen_opacity.clamp(0.0, 1.0).to_ne_bytes());
         bytes[24..28].copy_from_slice(&(premultiply_alpha as u8 as f32).to_ne_bytes());
+        bytes[32..36].copy_from_slice(&(f32::from(self.background[0]) / 255.0).to_ne_bytes());
+        bytes[36..40].copy_from_slice(&(f32::from(self.background[1]) / 255.0).to_ne_bytes());
+        bytes[40..44].copy_from_slice(&(f32::from(self.background[2]) / 255.0).to_ne_bytes());
+        bytes[44..48].copy_from_slice(&1.0_f32.to_ne_bytes());
         self.queue.write_buffer(&self.cursor_buffer, 0, &bytes);
     }
 
@@ -443,15 +446,6 @@ fn create_frame_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
     })
 }
 
-fn create_frame_sampler(device: &wgpu::Device) -> wgpu::Sampler {
-    device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("c-term frame sampler"),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    })
-}
-
 fn create_scratch_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("c-term scroll scratch texture"),
@@ -472,7 +466,6 @@ fn create_scratch_texture(device: &wgpu::Device, width: u32, height: u32) -> wgp
 fn create_frame_bind_group(
     device: &wgpu::Device,
     pipeline: &wgpu::RenderPipeline,
-    sampler: &wgpu::Sampler,
     texture: &wgpu::Texture,
     cursor_buffer: &wgpu::Buffer,
     overlay_buffer: &wgpu::Buffer,
@@ -489,14 +482,10 @@ fn create_frame_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
                 resource: cursor_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 3,
+                binding: 2,
                 resource: overlay_buffer.as_entire_binding(),
             },
         ],
@@ -536,6 +525,7 @@ const BLIT_SHADER: &str = r#"
 struct Globals {
     rect: vec4<f32>,
     overlay: vec4<f32>,
+    background: vec4<f32>,
 };
 
 struct Overlay {
@@ -569,9 +559,30 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
 }
 
 @group(0) @binding(0) var frame_texture: texture_2d<f32>;
-@group(0) @binding(1) var frame_sampler: sampler;
-@group(0) @binding(2) var<uniform> globals: Globals;
-@group(0) @binding(3) var<storage, read> overlays: array<Overlay, 16>;
+@group(0) @binding(1) var<uniform> globals: Globals;
+@group(0) @binding(2) var<storage, read> overlays: array<Overlay, 16>;
+
+fn output_color(color: vec4<f32>) -> vec4<f32> {
+    if (globals.overlay.z > 0.5) {
+        return vec4<f32>(color.rgb * color.a, color.a);
+    }
+    return color;
+}
+
+fn srgb_to_linear_channel(value: f32) -> f32 {
+    if (value <= 0.04045) {
+        return value / 12.92;
+    }
+    return pow((value + 0.055) / 1.055, 2.4);
+}
+
+fn srgb_to_linear(color: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        srgb_to_linear_channel(color.r),
+        srgb_to_linear_channel(color.g),
+        srgb_to_linear_channel(color.b),
+    );
+}
 
 fn smoothstep_local(edge0: f32, edge1: f32, value: f32) -> f32 {
     let t = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
@@ -646,12 +657,12 @@ fn overlay_alpha(point: vec2<f32>, overlay: Overlay) -> f32 {
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let dims = textureDimensions(frame_texture);
     let texel = vec2<i32>(in.position.xy);
+    let screen_alpha = clamp(globals.overlay.y, 0.0, 1.0);
     if (texel.x < 0 || texel.y < 0 || texel.x >= i32(dims.x) || texel.y >= i32(dims.y)) {
-        return vec4<f32>(0.0);
+        return output_color(vec4<f32>(srgb_to_linear(globals.background.rgb), screen_alpha));
     }
 
-    let uv = (vec2<f32>(texel) + vec2<f32>(0.5, 0.5)) / vec2<f32>(dims);
-    var color = textureSampleLevel(frame_texture, frame_sampler, uv, 0.0);
+    var color = textureLoad(frame_texture, texel, 0);
     let pixel = vec2<f32>(texel);
     let count = min(u32(globals.overlay.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
@@ -667,11 +678,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         pixel.y >= rect.y && pixel.y < rect.y + rect.w) {
         color = vec4<f32>(vec3<f32>(1.0) - color.rgb, color.a);
     }
-    let screen_alpha = clamp(globals.overlay.y, 0.0, 1.0);
     color = vec4<f32>(color.rgb, color.a * screen_alpha);
-    if (globals.overlay.z > 0.5) {
-        return vec4<f32>(color.rgb * color.a, color.a);
-    }
-    return color;
+    return output_color(color);
 }
 "#;
