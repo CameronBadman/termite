@@ -95,11 +95,23 @@ impl TextRenderer {
         y: u16,
         cols: u16,
     ) {
+        self.fill_row_backgrounds(row, frame, width, y, cols);
+        self.draw_row_foregrounds(row, frame, width, y, cols);
+    }
+
+    fn fill_row_backgrounds(
+        &self,
+        row: &[Cell],
+        frame: &mut [u8],
+        width: usize,
+        y: u16,
+        cols: u16,
+    ) {
         let mut x = 0;
         while x < cols {
             let cell = row.get(usize::from(x)).copied().unwrap_or_default();
+            let bg = self.theme.color(cell.style.background);
             if cell.spacer {
-                let bg = self.theme.color(cell.style.background);
                 fill_cell(frame, width, x, y, bg, self.metrics);
                 x += 1;
                 continue;
@@ -107,7 +119,30 @@ impl TextRenderer {
 
             let base_columns = if cell.wide && x + 1 < cols { 2 } else { 1 };
             let columns = self.display_columns(row, x, cols, cell, base_columns);
-            self.draw_cell(frame, width, x, y, cell, columns);
+            fill_cell_span(frame, width, x, y, columns, bg, self.metrics);
+            x += columns;
+        }
+    }
+
+    fn draw_row_foregrounds(
+        &mut self,
+        row: &[Cell],
+        frame: &mut [u8],
+        width: usize,
+        y: u16,
+        cols: u16,
+    ) {
+        let mut x = 0;
+        while x < cols {
+            let cell = row.get(usize::from(x)).copied().unwrap_or_default();
+            if cell.spacer {
+                x += 1;
+                continue;
+            }
+
+            let base_columns = if cell.wide && x + 1 < cols { 2 } else { 1 };
+            let columns = self.display_columns(row, x, cols, cell, base_columns);
+            self.draw_cell_foreground(frame, width, x, y, cell, columns);
             x += columns;
         }
     }
@@ -143,7 +178,7 @@ impl TextRenderer {
         }
     }
 
-    fn draw_cell(
+    fn draw_cell_foreground(
         &mut self,
         frame: &mut [u8],
         width: usize,
@@ -165,7 +200,6 @@ impl TextRenderer {
             return;
         }
 
-        fill_cell_span(frame, width, cell_x, cell_y, columns, bg, self.metrics);
         if ch != ' ' {
             if let Some(key) = self.glyph_key(ch, style, columns) {
                 let synthetic_bold = style.bold && !self.fonts[key.font].role.is_bold();
@@ -361,11 +395,7 @@ fn rasterize_scaled_glyph(
         }
     });
 
-    let left = clamp_glyph_axis(
-        bounds.min.x.floor() as i16,
-        width,
-        metrics.cell_width as u16,
-    );
+    let left = bounds.min.x.floor() as i16;
     let top = clamp_glyph_axis(
         bounds.min.y.floor() as i16,
         height,
@@ -462,14 +492,15 @@ fn draw_glyph_bitmap(
         }
         for x in 0..glyph.width {
             let cell_px = glyph.left + x as i16 + paint.x_shift;
-            if !(0..glyph_metrics.cell_width as i16).contains(&cell_px) {
+            let frame_x = origin_x as i32 + i32::from(cell_px);
+            if frame_x < 0 || frame_x >= width as i32 {
                 continue;
             }
             let alpha = glyph.alpha[usize::from(y) * usize::from(glyph.width) + usize::from(x)];
             if alpha == 0 {
                 continue;
             }
-            let index = ((origin_y + cell_py as usize) * width + origin_x + cell_px as usize) * 4;
+            let index = ((origin_y + cell_py as usize) * width + frame_x as usize) * 4;
             blend_pixel(&mut frame[index..index + 4], paint.color, alpha);
         }
     }
