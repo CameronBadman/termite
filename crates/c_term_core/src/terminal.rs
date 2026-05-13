@@ -828,6 +828,17 @@ mod tests {
     }
 
     #[test]
+    fn disabled_autowrap_overwrites_last_column() {
+        let mut terminal = TerminalCore::new(3, 2);
+        let _ = terminal.process_pty_input(b"\x1b[?7labcd");
+
+        assert_eq!(row_text(terminal.grid(), 0), "abd");
+        assert_eq!(row_text(terminal.grid(), 1), "   ");
+        assert_eq!(terminal.grid().cursor().x, 2);
+        assert_eq!(terminal.grid().cursor().y, 0);
+    }
+
+    #[test]
     fn wide_characters_leave_spacer_cells() {
         let mut terminal = TerminalCore::new(4, 1);
         let _ = terminal.process_pty_input("表x".as_bytes());

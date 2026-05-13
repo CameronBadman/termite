@@ -515,6 +515,9 @@ fn draw_glyph_bitmap(
         }
         for x in 0..glyph.width {
             let cell_px = glyph.left + x as i16 + paint.x_shift;
+            if !(0..glyph_metrics.cell_width as i16).contains(&cell_px) {
+                continue;
+            }
             let frame_x = origin_x as i32 + i32::from(cell_px);
             if frame_x < 0 || frame_x >= width as i32 {
                 continue;
@@ -609,6 +612,48 @@ fn draw_underline_span(
     for px in 0..pixel_width {
         let index = (y * width + origin_x + px) * 4;
         frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glyph_bitmap_is_clipped_to_its_cell_span() {
+        let metrics = TerminalMetrics {
+            cell_width: 3,
+            cell_height: 1,
+        };
+        let mut frame = vec![0; 6 * 4];
+        let glyph = GlyphBitmap {
+            left: 2,
+            top: 0,
+            width: 3,
+            height: 1,
+            alpha: vec![255; 3],
+        };
+
+        draw_glyph_bitmap(
+            &mut frame,
+            6,
+            0,
+            0,
+            &glyph,
+            GlyphPaint {
+                color: [255, 255, 255],
+                x_shift: 0,
+                origin_metrics: metrics,
+                glyph_metrics: metrics,
+            },
+        );
+
+        assert_eq!(&frame[2 * 4..2 * 4 + 3], &[255, 255, 255]);
+        assert!(
+            frame[3 * 4..]
+                .chunks_exact(4)
+                .all(|pixel| pixel[..3] == [0, 0, 0])
+        );
     }
 }
 
