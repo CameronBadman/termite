@@ -14,32 +14,31 @@ const PERSIST_ZOOM: bool = true;
 const FONT_SIZE: f32 = 17.4;
 const CELL_WIDTH_RATIO: f32 = 0.46;
 const CELL_HEIGHT_RATIO: f32 = 1.32;
-const MIN_THEME_CONTRAST: f32 = 7.0;
-const ANSI_SATURATION: f32 = 1.28;
 const TEXT_WEIGHT: f32 = 1.16;
 const SYMBOL_WEIGHT: f32 = 1.0;
 const TEXT_GAMMA: f32 = 0.92;
 const SYMBOL_GAMMA: f32 = 1.0;
-const THEME_FOREGROUND: [u8; 3] = [255, 255, 255];
-const THEME_BACKGROUND: [u8; 3] = [6, 7, 10];
+const THEME_FOREGROUND: [u8; 3] = [205, 214, 244];
+const THEME_BACKGROUND: [u8; 3] = [30, 30, 46];
 const THEME_ANSI: [[u8; 3]; 16] = [
-    [7, 8, 12],
-    [255, 45, 76],
-    [30, 255, 110],
-    [255, 205, 45],
-    [50, 150, 255],
-    [220, 70, 255],
-    [28, 238, 255],
-    [232, 236, 248],
-    [125, 132, 154],
-    [255, 72, 105],
-    [78, 255, 142],
-    [255, 226, 72],
-    [92, 180, 255],
-    [236, 104, 255],
-    [80, 250, 255],
-    [255, 255, 255],
+    [69, 71, 90],
+    [243, 139, 168],
+    [166, 227, 161],
+    [249, 226, 175],
+    [137, 180, 250],
+    [245, 194, 231],
+    [148, 226, 213],
+    [186, 194, 222],
+    [88, 91, 112],
+    [243, 139, 168],
+    [166, 227, 161],
+    [249, 226, 175],
+    [137, 180, 250],
+    [245, 194, 231],
+    [148, 226, 213],
+    [166, 173, 200],
 ];
+const KITTY_CURSOR: [u8; 3] = [245, 224, 220];
 const TTF_FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/liberation-fonts/LiberationMono-Regular.ttf",
     "/usr/share/fonts/liberation-fonts/LiberationMono-Bold.ttf",
@@ -71,13 +70,11 @@ fn terminal_font() -> impl RunnerPart {
 }
 
 fn terminal_theme() -> impl RunnerPart {
-    theme(readable_theme(
-        THEME_FOREGROUND,
-        THEME_BACKGROUND,
-        THEME_ANSI,
-        ANSI_SATURATION,
-        MIN_THEME_CONTRAST,
-    ))
+    theme(Theme {
+        foreground: THEME_FOREGROUND,
+        background: THEME_BACKGROUND,
+        ansi: THEME_ANSI,
+    })
 }
 
 fn terminal_text_render() -> impl RunnerPart {
@@ -121,9 +118,9 @@ fn cursor_line_plugin() -> CursorLine {
 
 fn cursor_line_config() -> CursorLineConfig {
     CursorLineConfig {
-        row_color: [22, 112, 146],
+        row_color: KITTY_CURSOR,
         row_alpha: 0,
-        cell_color: [255, 218, 88],
+        cell_color: KITTY_CURSOR,
         cell_alpha: 40,
     }
 }
@@ -138,7 +135,7 @@ fn cursor_trail_config() -> CursorTrailConfig {
         decay_ms: 320,
         fast_decay_ratio: 0.42,
         threshold: 2,
-        color: CursorTrailColor::Auto,
+        color: CursorTrailColor::Rgb(KITTY_CURSOR),
     }
 }
 
@@ -146,78 +143,6 @@ fn metrics_for_font(size: f32, width_ratio: f32, height_ratio: f32) -> TerminalM
     TerminalMetrics {
         cell_width: (size * width_ratio).round().max(1.0) as u32,
         cell_height: (size * height_ratio).round().max(1.0) as u32,
-    }
-}
-
-fn readable_theme(
-    foreground: [u8; 3],
-    background: [u8; 3],
-    ansi: [[u8; 3]; 16],
-    saturation: f32,
-    min_contrast: f32,
-) -> Theme {
-    Theme {
-        foreground: ensure_contrast(foreground, background, min_contrast),
-        background,
-        ansi: ansi.map(|color| ensure_contrast(saturate(color, saturation), background, 3.0)),
-    }
-}
-
-fn saturate(color: [u8; 3], amount: f32) -> [u8; 3] {
-    let gray =
-        0.2126 * f32::from(color[0]) + 0.7152 * f32::from(color[1]) + 0.0722 * f32::from(color[2]);
-    color.map(|channel| {
-        (gray + (f32::from(channel) - gray) * amount)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    })
-}
-
-fn ensure_contrast(mut foreground: [u8; 3], background: [u8; 3], min_ratio: f32) -> [u8; 3] {
-    let target = if luminance(background) < 0.5 {
-        [255, 255, 255]
-    } else {
-        [0, 0, 0]
-    };
-    for _ in 0..16 {
-        if contrast_ratio(foreground, background) >= min_ratio {
-            return foreground;
-        }
-        foreground = mix(foreground, target, 0.18);
-    }
-    foreground
-}
-
-fn mix(color: [u8; 3], target: [u8; 3], amount: f32) -> [u8; 3] {
-    [
-        mix_channel(color[0], target[0], amount),
-        mix_channel(color[1], target[1], amount),
-        mix_channel(color[2], target[2], amount),
-    ]
-}
-
-fn mix_channel(value: u8, target: u8, amount: f32) -> u8 {
-    (f32::from(value) + (f32::from(target) - f32::from(value)) * amount)
-        .round()
-        .clamp(0.0, 255.0) as u8
-}
-
-fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
-    let a = luminance(a) + 0.05;
-    let b = luminance(b) + 0.05;
-    if a > b { a / b } else { b / a }
-}
-
-fn luminance(color: [u8; 3]) -> f32 {
-    0.2126 * linear(color[0]) + 0.7152 * linear(color[1]) + 0.0722 * linear(color[2])
-}
-
-fn linear(channel: u8) -> f32 {
-    let channel = f32::from(channel) / 255.0;
-    if channel <= 0.03928 {
-        channel / 12.92
-    } else {
-        ((channel + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -280,15 +205,10 @@ mod tests {
     fn runner_config_can_select_theme() {
         let runner = Runner::new().with(terminal_theme());
 
-        assert_eq!(runner.theme().background, [6, 7, 10]);
-        assert_eq!(
-            runner.theme().ansi[1],
-            saturate([255, 45, 76], ANSI_SATURATION)
-        );
-        assert!(
-            contrast_ratio(runner.theme().foreground, runner.theme().background)
-                >= MIN_THEME_CONTRAST
-        );
+        assert_eq!(runner.theme().foreground, [205, 214, 244]);
+        assert_eq!(runner.theme().background, [30, 30, 46]);
+        assert_eq!(runner.theme().ansi[1], [243, 139, 168]);
+        assert_eq!(runner.theme().ansi[15], [166, 173, 200]);
     }
 
     #[test]
