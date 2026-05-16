@@ -669,6 +669,9 @@ impl Grid {
         let x = usize::from(self.cursor.x);
         let width = usize::from(self.width);
         let count = usize::from(count.min(self.width - self.cursor.x));
+        if count == 0 {
+            return;
+        }
         let row_end = row_start + width;
         let mut changed = self.cells[row_start + x..row_end]
             .iter()
@@ -705,6 +708,9 @@ impl Grid {
 
         let width = usize::from(self.width);
         let count = usize::from(count.min(bottom - top + 1));
+        if count == 0 {
+            return;
+        }
         if !down && top == 0 && bottom == self.height.saturating_sub(1) {
             let height = usize::from(self.height);
             for row in 0..count.min(height) {
@@ -734,33 +740,21 @@ impl Grid {
             return;
         }
 
-        let mut rows: Vec<Vec<Cell>> = (top..=bottom)
-            .map(|y| {
-                let row_start = self.row_start(y);
-                self.cells[row_start..row_start + width].to_vec()
-            })
-            .collect();
+        let region_len = usize::from(bottom - top + 1);
         if down {
-            for y in (0..rows.len()).rev() {
-                rows[y] = if y >= count {
-                    rows[y - count].clone()
-                } else {
-                    blank_row(self.width)
-                };
+            for offset in (count..region_len).rev() {
+                self.copy_row(top + (offset - count) as u16, top + offset as u16);
+            }
+            for y in top..top + count as u16 {
+                self.clear_row(y);
             }
         } else {
-            for y in 0..rows.len() {
-                rows[y] = if y + count < rows.len() {
-                    rows[y + count].clone()
-                } else {
-                    blank_row(self.width)
-                };
+            for offset in 0..region_len - count {
+                self.copy_row(top + (offset + count) as u16, top + offset as u16);
             }
-        }
-        for (index, y) in (top..=bottom).enumerate() {
-            let row_start = self.row_start(y);
-            self.cells[row_start..row_start + width].copy_from_slice(&rows[index]);
-            self.refresh_wide_row(y);
+            for y in bottom - count as u16 + 1..=bottom {
+                self.clear_row(y);
+            }
         }
 
         self.generation += 1;
@@ -865,6 +859,36 @@ impl Grid {
                 old: Some((old.x, old.y)),
                 new: (self.cursor.x, self.cursor.y),
             });
+        }
+    }
+
+    fn copy_row(&mut self, src_y: u16, dst_y: u16) {
+        if src_y == dst_y {
+            return;
+        }
+
+        let width = usize::from(self.width);
+        let src_start = self.row_start(src_y);
+        let dst_start = self.row_start(dst_y);
+        self.cells
+            .copy_within(src_start..src_start + width, dst_start);
+
+        let src_row = self.physical_row(src_y);
+        let dst_row = self.physical_row(dst_y);
+        let has_wide = self.wide_rows.get(src_row).copied().unwrap_or(false);
+        if let Some(wide) = self.wide_rows.get_mut(dst_row) {
+            *wide = has_wide;
+        }
+    }
+
+    fn clear_row(&mut self, y: u16) {
+        let width = usize::from(self.width);
+        let row_start = self.row_start(y);
+        self.cells[row_start..row_start + width].fill(Cell::default());
+
+        let physical_row = self.physical_row(y);
+        if let Some(wide) = self.wide_rows.get_mut(physical_row) {
+            *wide = false;
         }
     }
 
