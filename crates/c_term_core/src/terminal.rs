@@ -130,17 +130,16 @@ where
             return self.tick();
         }
         while self.parser.can_process_ascii_fast_path() && !input.is_empty() {
-            let prefix_len = fast_text_prefix_len(input);
-            if prefix_len > 0 {
-                self.process_fast_text(&input[..prefix_len]);
-                if prefix_len == input.len() {
-                    return self.tick();
-                }
-                input = &input[prefix_len..];
-                continue;
-            }
             if let Some(sgr_len) = self.process_fast_sgr(input) {
                 input = &input[sgr_len..];
+                continue;
+            }
+            let consumed = self.process_fast_text(input);
+            if consumed > 0 {
+                if consumed == input.len() {
+                    return self.tick();
+                }
+                input = &input[consumed..];
                 continue;
             }
             break;
@@ -203,7 +202,7 @@ where
         Some(())
     }
 
-    fn process_fast_text(&mut self, input: &[u8]) {
+    fn process_fast_text(&mut self, input: &[u8]) -> usize {
         let mut index = 0;
         while index < input.len() {
             if input[index].is_ascii_graphic() || input[index] == b' ' {
@@ -217,7 +216,9 @@ where
                 self.last_printed = char::from(input[index - 1]);
                 continue;
             }
-            if let Some(ch) = decode_utf8_char(input, index) {
+            if let Some(ch) = decode_utf8_char(input, index)
+                && !ch.is_control()
+            {
                 let _ = self.grid.put_char(ch, self.style);
                 self.last_printed = ch;
                 index += ch.len_utf8();
@@ -248,10 +249,11 @@ where
                     let _ = self.grid.put_char(ch, self.style);
                     self.last_printed = ch;
                 }
-                _ => {}
+                _ => break,
             }
             index += 1;
         }
+        index
     }
 
     fn apply_action(&mut self, action: ParserAction) {
@@ -474,30 +476,6 @@ where
         self.scrollback.extend(rows);
         recycled_rows
     }
-}
-
-fn is_fast_ascii(byte: u8) -> bool {
-    matches!(
-        byte,
-        b'\n' | b'\r' | b'\t' | 0x08 | 0x0b | 0x0c | 0x20..=0x7e
-    )
-}
-
-fn fast_text_prefix_len(input: &[u8]) -> usize {
-    let mut index = 0;
-    while index < input.len() {
-        let byte = input[index];
-        if is_fast_ascii(byte) {
-            index += 1;
-        } else if let Some(ch) = decode_utf8_char(input, index)
-            && !ch.is_control()
-        {
-            index += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    index
 }
 
 fn decode_utf8_char(input: &[u8], index: usize) -> Option<char> {
