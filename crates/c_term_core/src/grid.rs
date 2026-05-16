@@ -381,6 +381,19 @@ impl Grid {
         self.scroll_bottom = self.height.saturating_sub(1);
     }
 
+    pub fn screen_alignment(&mut self, style: Style) {
+        let cell = Cell {
+            ch: 'E',
+            style,
+            wide: false,
+            spacer: false,
+        };
+        self.cells.fill(cell);
+        self.wide_rows.fill(false);
+        self.generation += 1;
+        self.damage.mark(DamageRegion::Viewport);
+    }
+
     pub fn clear_screen(&mut self, mode: EraseMode) {
         let mut changed = false;
         match mode {

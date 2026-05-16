@@ -96,6 +96,76 @@ fn pending_wrap_is_cancelled_by_carriage_return() {
 }
 
 #[test]
+fn index_escape_preserves_column_and_scrolls_at_bottom_margin() {
+    let mut terminal = TerminalCore::new(4, 3);
+    feed(&mut terminal, b"ab\x1bDcd\x1b[3;3H\x1bDZZ");
+
+    assert_screen(&terminal, &["  cd", "    ", "  ZZ"]);
+    assert_eq!(terminal.grid().cursor().x, 3);
+    assert_eq!(terminal.grid().cursor().y, 2);
+}
+
+#[test]
+fn next_line_and_reverse_index_match_vt_cursor_controls() {
+    let mut terminal = TerminalCore::new(4, 3);
+    feed(&mut terminal, b"ab\x1bEcd\x1b[1;1H\x1bMZ");
+
+    assert_screen(&terminal, &["Z   ", "ab  ", "cd  "]);
+    assert_eq!(terminal.grid().cursor().x, 1);
+    assert_eq!(terminal.grid().cursor().y, 0);
+}
+
+#[test]
+fn screen_alignment_fills_visible_grid_and_clears_wide_state() {
+    let mut terminal = TerminalCore::new(4, 2);
+    feed(&mut terminal, "表x\x1b[2;3Hy\x1b#8".as_bytes());
+
+    assert_screen(&terminal, &["EEEE", "EEEE"]);
+    assert_wide_invariants(terminal.grid());
+    for y in 0..terminal.grid().height() {
+        for x in 0..terminal.grid().width() {
+            let current = cell(terminal.grid(), x, y);
+            assert!(!current.wide);
+            assert!(!current.spacer);
+        }
+    }
+}
+
+#[test]
+fn ignored_c0_controls_do_not_split_or_pollute_printed_text() {
+    let mut terminal = TerminalCore::new(5, 1);
+    feed(&mut terminal, b"A\x00\x01\x02B\x06C");
+
+    assert_screen(&terminal, &["ABC  "]);
+}
+
+#[test]
+fn csi_leading_zeroes_and_empty_params_use_vt_defaults() {
+    let mut terminal = TerminalCore::new(4, 3);
+    feed(&mut terminal, b"\x1b[0002;0003HZ\x1b[;HY");
+
+    assert_screen(&terminal, &["Y   ", "  Z ", "    "]);
+}
+
+#[test]
+fn cursor_position_is_clamped_to_visible_grid() {
+    let mut terminal = TerminalCore::new(4, 3);
+    feed(&mut terminal, b"\x1b[999;999HZ");
+
+    assert_screen(&terminal, &["    ", "    ", "   Z"]);
+    assert_eq!(terminal.grid().cursor().x, 3);
+    assert_eq!(terminal.grid().cursor().y, 2);
+}
+
+#[test]
+fn repeat_with_default_count_reprints_once() {
+    let mut terminal = TerminalCore::new(5, 1);
+    feed(&mut terminal, b"A\x1b[b");
+
+    assert_screen(&terminal, &["AA   "]);
+}
+
+#[test]
 fn wide_character_at_right_edge_wraps_without_corrupting_edge_cell() {
     let mut terminal = TerminalCore::new(4, 2);
     feed(&mut terminal, "abc表Z".as_bytes());

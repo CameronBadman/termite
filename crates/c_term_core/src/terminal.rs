@@ -289,6 +289,7 @@ where
                 }
             }
             ParserAction::Reset => self.reset(),
+            ParserAction::ScreenAlignment => self.grid.screen_alignment(self.style),
             ParserAction::SaveCursor => self.saved_cursor = Some(self.grid.cursor()),
             ParserAction::RestoreCursor => {
                 if let Some(cursor) = self.saved_cursor {

@@ -9,6 +9,7 @@ pub enum ParserAction {
     CarriageReturn,
     Backspace,
     Reset,
+    ScreenAlignment,
     Repeat(u16),
     MoveCursor { x: u16, y: u16 },
     MoveCursorRelative { dx: i16, dy: i16 },
@@ -322,10 +323,15 @@ impl vte::Perform for ActionPerformer<'_> {
             }
             return;
         }
+        if intermediates == b"#" && byte == b'8' {
+            self.actions.push(ParserAction::ScreenAlignment);
+            return;
+        }
         if !intermediates.is_empty() {
             return;
         }
         match byte {
+            b'D' => self.actions.push(ParserAction::LineFeed),
             b'c' => self.actions.push(ParserAction::Reset),
             b'7' => self.actions.push(ParserAction::SaveCursor),
             b'8' => self.actions.push(ParserAction::RestoreCursor),
