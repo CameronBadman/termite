@@ -170,8 +170,8 @@ impl TextRenderer {
                 continue;
             }
 
-            if let Some(end) = self.draw_shaped_text_run(row, frame, width, x, y, cols) {
-                x = end;
+            if is_shapable_cell(cell) && !cell.ch.is_ascii() {
+                x = self.draw_text_run_foregrounds(row, frame, width, x, y, cols);
                 continue;
             }
 
@@ -182,7 +182,7 @@ impl TextRenderer {
         }
     }
 
-    fn draw_shaped_text_run(
+    fn draw_text_run_foregrounds(
         &mut self,
         row: &[Cell],
         frame: &mut [u8],
@@ -190,35 +190,57 @@ impl TextRenderer {
         x: u16,
         y: u16,
         cols: u16,
-    ) -> Option<u16> {
+    ) -> u16 {
         let first = row.get(usize::from(x)).copied().unwrap_or_default();
-        if !is_shapable_cell(first) {
-            return None;
-        }
-
         let mut end = x + 1;
+        let mut previous = first.ch;
+        let mut needs_shaping = char_may_need_shaping(first.ch, '\0');
         while end < cols {
             let cell = row.get(usize::from(end)).copied().unwrap_or_default();
             if cell.style != first.style || !is_shapable_cell(cell) {
                 break;
             }
+            needs_shaping |= char_may_need_shaping(cell.ch, previous);
+            previous = cell.ch;
             end += 1;
         }
-        if end - x < 2 {
-            return None;
+
+        if needs_shaping
+            && end - x >= 2
+            && self.draw_shaped_text_run(row, frame, width, x, y, end, first)
+        {
+            return end;
         }
 
+        for cell_x in x..end {
+            let cell = row.get(usize::from(cell_x)).copied().unwrap_or_default();
+            self.draw_cell_foreground(frame, width, cell_x, y, cell, 1);
+        }
+        end
+    }
+
+    fn draw_shaped_text_run(
+        &mut self,
+        row: &[Cell],
+        frame: &mut [u8],
+        width: usize,
+        x: u16,
+        y: u16,
+        end: u16,
+        first: Cell,
+    ) -> bool {
         let text = row[usize::from(x)..usize::from(end)]
             .iter()
             .map(|cell| cell.ch)
             .collect::<String>();
-        if !may_need_shaping(&text) {
-            return None;
-        }
-        let font = self.shaping_font_index(&text, first.style)?;
-        let glyphs = self.shape_text(font, &text, end - x, first.style)?;
+        let Some(font) = self.shaping_font_index(&text, first.style) else {
+            return false;
+        };
+        let Some(glyphs) = self.shape_text(font, &text, end - x, first.style) else {
+            return false;
+        };
         if glyphs.is_empty() {
-            return None;
+            return false;
         }
 
         let fg = self.theme.color(first.style.foreground);
@@ -260,7 +282,7 @@ impl TextRenderer {
         if first.style.underline {
             draw_underline_span(frame, width, x, y, end - x, fg, self.metrics);
         }
-        Some(end)
+        true
     }
 
     fn display_columns(
@@ -490,18 +512,38 @@ fn shaping_changed(font: &FontArc, text: &str, infos: &[rustybuzz::GlyphInfo]) -
         .any(|(info, ch)| u32::from(font.glyph_id(ch).0) != info.glyph_id)
 }
 
+#[cfg(test)]
 fn may_need_shaping(text: &str) -> bool {
     let mut previous = '\0';
     for ch in text.chars() {
-        if !ch.is_ascii() || matches!(ch, '=' | '>' | '<' | '-' | '!' | '/' | '|' | ':' | '.') {
-            return true;
-        }
-        if previous == 'f' && matches!(ch, 'i' | 'l' | 'f') {
+        if char_may_need_shaping(ch, previous) {
             return true;
         }
         previous = ch;
     }
     false
+}
+
+fn char_may_need_shaping(ch: char, previous: char) -> bool {
+    !ch.is_ascii()
+        || matches!(
+            (previous, ch),
+            ('=', '>')
+                | ('=', '=')
+                | ('=', '<')
+                | ('<', '=')
+                | ('>', '=')
+                | ('!', '=')
+                | ('-', '>')
+                | ('<', '-')
+                | ('|', '>')
+                | ('<', '|')
+                | (':', ':')
+                | ('.', '.')
+                | ('f', 'i')
+                | ('f', 'l')
+                | ('f', 'f')
+        )
 }
 
 fn glyph_metrics(base: TerminalMetrics, columns: u16) -> TerminalMetrics {
@@ -912,6 +954,7 @@ mod tests {
     #[test]
     fn shaping_guard_skips_plain_words_and_accepts_ligature_candidates() {
         assert!(!may_need_shaping("plainWord123"));
+        assert!(!may_need_shaping("a=b.c-d/e"));
         assert!(may_need_shaping("=>"));
         assert!(may_need_shaping("office"));
         assert!(may_need_shaping("λx"));
