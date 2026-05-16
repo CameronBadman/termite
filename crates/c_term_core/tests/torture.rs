@@ -1,4 +1,4 @@
-use c_term_core::{Cell, Grid, TerminalCore};
+use c_term_core::{Cell, Color, Grid, TerminalCore};
 
 fn feed(terminal: &mut TerminalCore, input: impl AsRef<[u8]>) {
     let _ = terminal.process_pty_input(input.as_ref());
@@ -163,6 +163,74 @@ fn repeat_with_default_count_reprints_once() {
     feed(&mut terminal, b"A\x1b[b");
 
     assert_screen(&terminal, &["AA   "]);
+}
+
+#[test]
+fn sgr_256_colors_apply_to_foreground_and_background() {
+    let mut terminal = TerminalCore::new(4, 1);
+    feed(&mut terminal, b"\x1b[38;5;196mR\x1b[48;5;46mG\x1b[0mX");
+
+    assert_screen(&terminal, &["RGX "]);
+    assert_eq!(
+        cell(terminal.grid(), 0, 0).style.foreground,
+        Color::Indexed(196)
+    );
+    assert_eq!(
+        cell(terminal.grid(), 1, 0).style.background,
+        Color::Indexed(46)
+    );
+    assert_eq!(
+        cell(terminal.grid(), 2, 0).style.foreground,
+        Color::DefaultForeground
+    );
+    assert_eq!(
+        cell(terminal.grid(), 2, 0).style.background,
+        Color::DefaultBackground
+    );
+}
+
+#[test]
+fn sgr_truecolor_semicolon_and_colon_forms_apply() {
+    let mut terminal = TerminalCore::new(3, 1);
+    feed(&mut terminal, b"\x1b[38;2;1;2;3mA\x1b[48:2:4:5:6mB");
+
+    assert_screen(&terminal, &["AB "]);
+    assert_eq!(
+        cell(terminal.grid(), 0, 0).style.foreground,
+        Color::Rgb(1, 2, 3)
+    );
+    assert_eq!(
+        cell(terminal.grid(), 1, 0).style.background,
+        Color::Rgb(4, 5, 6)
+    );
+}
+
+#[test]
+fn sgr_bright_colors_and_selective_resets_apply() {
+    let mut terminal = TerminalCore::new(4, 1);
+    feed(&mut terminal, b"\x1b[91;104mA\x1b[39mB\x1b[49mC");
+
+    assert_screen(&terminal, &["ABC "]);
+    assert_eq!(
+        cell(terminal.grid(), 0, 0).style.foreground,
+        Color::Indexed(9)
+    );
+    assert_eq!(
+        cell(terminal.grid(), 0, 0).style.background,
+        Color::Indexed(12)
+    );
+    assert_eq!(
+        cell(terminal.grid(), 1, 0).style.foreground,
+        Color::DefaultForeground
+    );
+    assert_eq!(
+        cell(terminal.grid(), 1, 0).style.background,
+        Color::Indexed(12)
+    );
+    assert_eq!(
+        cell(terminal.grid(), 2, 0).style.background,
+        Color::DefaultBackground
+    );
 }
 
 #[test]
