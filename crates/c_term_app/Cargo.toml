@@ -11,6 +11,7 @@ c_term_core = { path = "../c_term_core" }
 font8x8 = "0.3.1"
 nix = { version = "0.31.2", features = ["fs", "process", "term"] }
 pollster = "0.4.0"
+rustybuzz = "0.20.1"
 wgpu = "29.0.3"
 wl-clipboard-rs = "0.9.3"
 winit = "0.30.12"

@@ -6,6 +6,7 @@ use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
     SGA_FONTS, UnicodeFonts,
 };
+use rustybuzz::{Face, UnicodeBuffer};
 
 use crate::{
     runner::{FontConfig, TerminalMetrics, TextRenderConfig},
@@ -17,6 +18,12 @@ struct GlyphKey {
     font: usize,
     ch: char,
     columns: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ShapedGlyphKey {
+    font: usize,
+    glyph_id: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +41,7 @@ impl FontRole {
 }
 
 struct LoadedFont {
+    bytes: Vec<u8>,
     font: FontArc,
     role: FontRole,
     symbol: bool,
@@ -51,6 +59,7 @@ struct GlyphBitmap {
 pub(super) struct TextRenderer {
     fonts: Vec<LoadedFont>,
     glyphs: HashMap<GlyphKey, GlyphBitmap>,
+    shaped_glyphs: HashMap<ShapedGlyphKey, GlyphBitmap>,
     metrics: TerminalMetrics,
     text_render: TextRenderConfig,
     theme: Theme,
@@ -66,9 +75,16 @@ pub(super) struct CellPaint {
 #[derive(Clone, Copy)]
 struct GlyphPaint {
     color: [u8; 3],
-    x_shift: i16,
+    x_shift: f32,
     origin_metrics: TerminalMetrics,
     glyph_metrics: TerminalMetrics,
+}
+
+#[derive(Clone, Copy)]
+struct ShapedGlyph {
+    key: ShapedGlyphKey,
+    x: f32,
+    synthetic_bold: bool,
 }
 
 impl TextRenderer {
@@ -81,6 +97,7 @@ impl TextRenderer {
         Self {
             fonts: load_fonts(font),
             glyphs: HashMap::new(),
+            shaped_glyphs: HashMap::new(),
             metrics,
             text_render,
             theme,
@@ -153,11 +170,97 @@ impl TextRenderer {
                 continue;
             }
 
+            if let Some(end) = self.draw_shaped_text_run(row, frame, width, x, y, cols) {
+                x = end;
+                continue;
+            }
+
             let base_columns = if cell.wide && x + 1 < cols { 2 } else { 1 };
             let columns = self.display_columns(row, x, cols, cell, base_columns);
             self.draw_cell_foreground(frame, width, x, y, cell, columns);
             x += columns;
         }
+    }
+
+    fn draw_shaped_text_run(
+        &mut self,
+        row: &[Cell],
+        frame: &mut [u8],
+        width: usize,
+        x: u16,
+        y: u16,
+        cols: u16,
+    ) -> Option<u16> {
+        let first = row.get(usize::from(x)).copied().unwrap_or_default();
+        if !is_shapable_cell(first) {
+            return None;
+        }
+
+        let mut end = x + 1;
+        while end < cols {
+            let cell = row.get(usize::from(end)).copied().unwrap_or_default();
+            if cell.style != first.style || !is_shapable_cell(cell) {
+                break;
+            }
+            end += 1;
+        }
+        if end - x < 2 {
+            return None;
+        }
+
+        let text = row[usize::from(x)..usize::from(end)]
+            .iter()
+            .map(|cell| cell.ch)
+            .collect::<String>();
+        if !may_need_shaping(&text) {
+            return None;
+        }
+        let font = self.shaping_font_index(&text, first.style)?;
+        let glyphs = self.shape_text(font, &text, end - x, first.style)?;
+        if glyphs.is_empty() {
+            return None;
+        }
+
+        let fg = self.theme.color(first.style.foreground);
+        let glyph_metrics = glyph_metrics(self.metrics, end - x);
+        for glyph in glyphs {
+            self.ensure_shaped_glyph(glyph.key, self.metrics);
+            if let Some(bitmap) = self.shaped_glyphs.get(&glyph.key) {
+                draw_glyph_bitmap(
+                    frame,
+                    width,
+                    x,
+                    y,
+                    bitmap,
+                    GlyphPaint {
+                        color: fg,
+                        x_shift: glyph.x,
+                        origin_metrics: self.metrics,
+                        glyph_metrics,
+                    },
+                );
+                if glyph.synthetic_bold {
+                    draw_glyph_bitmap(
+                        frame,
+                        width,
+                        x,
+                        y,
+                        bitmap,
+                        GlyphPaint {
+                            color: fg,
+                            x_shift: glyph.x + 1.0,
+                            origin_metrics: self.metrics,
+                            glyph_metrics,
+                        },
+                    );
+                }
+            }
+        }
+
+        if first.style.underline {
+            draw_underline_span(frame, width, x, y, end - x, fg, self.metrics);
+        }
+        Some(end)
     }
 
     fn display_columns(
@@ -227,7 +330,7 @@ impl TextRenderer {
                         glyph,
                         GlyphPaint {
                             color: fg,
-                            x_shift: 0,
+                            x_shift: 0.0,
                             origin_metrics: self.metrics,
                             glyph_metrics,
                         },
@@ -241,7 +344,7 @@ impl TextRenderer {
                             glyph,
                             GlyphPaint {
                                 color: fg,
-                                x_shift: 1,
+                                x_shift: 1.0,
                                 origin_metrics: self.metrics,
                                 glyph_metrics,
                             },
@@ -292,6 +395,60 @@ impl TextRenderer {
             .position(|font| font.font.glyph_id(ch) != GlyphId(0))
     }
 
+    fn shaping_font_index(&self, text: &str, style: Style) -> Option<usize> {
+        let roles = preferred_font_roles(style);
+        for role in roles {
+            if let Some(index) = self.fonts.iter().position(|font| {
+                font.role == *role
+                    && !font.symbol
+                    && text.chars().all(|ch| font.font.glyph_id(ch) != GlyphId(0))
+            }) {
+                return Some(index);
+            }
+        }
+        self.fonts.iter().position(|font| {
+            !font.symbol && text.chars().all(|ch| font.font.glyph_id(ch) != GlyphId(0))
+        })
+    }
+
+    fn shape_text(
+        &self,
+        font: usize,
+        text: &str,
+        columns: u16,
+        style: Style,
+    ) -> Option<Vec<ShapedGlyph>> {
+        let face = Face::from_slice(&self.fonts[font].bytes, 0)?;
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str(text);
+        let output = rustybuzz::shape(&face, &[], buffer);
+        let infos = output.glyph_infos();
+        let positions = output.glyph_positions();
+        if infos.is_empty() || !shaping_changed(&self.fonts[font].font, text, infos) {
+            return None;
+        }
+
+        let units_per_em = face.units_per_em() as f32;
+        let scale = self.fonts[font].scale.x / units_per_em.max(1.0);
+        let max_x = self.metrics.cell_width as f32 * f32::from(columns.max(1));
+        let synthetic_bold = style.bold && !self.fonts[font].role.is_bold();
+        let mut x = 0.0;
+        let mut glyphs = Vec::with_capacity(infos.len());
+        for (info, position) in infos.iter().zip(positions) {
+            let glyph_id = u16::try_from(info.glyph_id).ok()?;
+            let glyph_x = x + position.x_offset as f32 * scale;
+            if glyph_x < max_x {
+                glyphs.push(ShapedGlyph {
+                    key: ShapedGlyphKey { font, glyph_id },
+                    x: glyph_x,
+                    synthetic_bold,
+                });
+            }
+            x += position.x_advance as f32 * scale;
+        }
+        Some(glyphs)
+    }
+
     fn ensure_glyph(&mut self, key: GlyphKey, metrics: TerminalMetrics) {
         if self.glyphs.contains_key(&key) {
             return;
@@ -299,6 +456,52 @@ impl TextRenderer {
         let glyph = rasterize_glyph(&self.fonts[key.font], key.ch, metrics, self.text_render);
         self.glyphs.insert(key, glyph);
     }
+
+    fn ensure_shaped_glyph(&mut self, key: ShapedGlyphKey, metrics: TerminalMetrics) {
+        if self.shaped_glyphs.contains_key(&key) {
+            return;
+        }
+        let glyph = rasterize_glyph_id(
+            &self.fonts[key.font],
+            GlyphId(key.glyph_id),
+            metrics,
+            self.text_render,
+        );
+        self.shaped_glyphs.insert(key, glyph);
+    }
+}
+
+fn is_shapable_cell(cell: Cell) -> bool {
+    !cell.spacer
+        && !cell.wide
+        && cell.ch != ' '
+        && !is_private_use_symbol(cell.ch)
+        && !is_special_cell(cell.ch)
+}
+
+fn shaping_changed(font: &FontArc, text: &str, infos: &[rustybuzz::GlyphInfo]) -> bool {
+    let chars = text.chars().collect::<Vec<_>>();
+    if infos.len() != chars.len() {
+        return true;
+    }
+    infos
+        .iter()
+        .zip(chars)
+        .any(|(info, ch)| u32::from(font.glyph_id(ch).0) != info.glyph_id)
+}
+
+fn may_need_shaping(text: &str) -> bool {
+    let mut previous = '\0';
+    for ch in text.chars() {
+        if !ch.is_ascii() || matches!(ch, '=' | '>' | '<' | '-' | '!' | '/' | '|' | ':' | '.') {
+            return true;
+        }
+        if previous == 'f' && matches!(ch, 'i' | 'l' | 'f') {
+            return true;
+        }
+        previous = ch;
+    }
+    false
 }
 
 fn glyph_metrics(base: TerminalMetrics, columns: u16) -> TerminalMetrics {
@@ -317,9 +520,10 @@ fn load_fonts(font: FontConfig) -> Vec<LoadedFont> {
     for path in paths {
         let path = path;
         if let Ok(bytes) = fs::read(&path)
-            && let Ok(font) = FontArc::try_from_vec(bytes)
+            && let Ok(font) = FontArc::try_from_vec(bytes.clone())
         {
             loaded.push(LoadedFont {
+                bytes,
                 font,
                 role: font_role_from_path(&path),
                 symbol: is_symbol_font_path(&path),
@@ -375,9 +579,35 @@ fn rasterize_scaled_glyph(
     let scaled = font.font.as_scaled(scale);
     let glyph_id = scaled.glyph_id(ch);
     let advance = scaled.h_advance(glyph_id);
-    let x = ((metrics.cell_width as f32 - advance) * 0.5)
-        .floor()
-        .max(-1.0);
+    rasterize_positioned_glyph(font, scale, glyph_id, advance, metrics, render, true)
+}
+
+fn rasterize_glyph_id(
+    font: &LoadedFont,
+    glyph_id: GlyphId,
+    metrics: TerminalMetrics,
+    render: TextRenderConfig,
+) -> GlyphBitmap {
+    rasterize_positioned_glyph(font, font.scale, glyph_id, 0.0, metrics, render, false)
+}
+
+fn rasterize_positioned_glyph(
+    font: &LoadedFont,
+    scale: PxScale,
+    glyph_id: GlyphId,
+    advance: f32,
+    metrics: TerminalMetrics,
+    render: TextRenderConfig,
+    center_x: bool,
+) -> GlyphBitmap {
+    let scaled = font.font.as_scaled(scale);
+    let x = if center_x {
+        ((metrics.cell_width as f32 - advance) * 0.5)
+            .floor()
+            .max(-1.0)
+    } else {
+        0.0
+    };
     let baseline = ((metrics.cell_height as f32 - scaled.height()) * 0.5 + scaled.ascent()).round();
     let glyph = glyph_id.with_scale_and_position(scale, point(x, baseline));
     let Some(outlined) = scaled.outline_glyph(glyph) else {
@@ -448,6 +678,29 @@ fn is_private_use_symbol(ch: char) -> bool {
     matches!(ch as u32, 0xe000..=0xf8ff | 0xf0000..=0xffffd | 0x100000..=0x10fffd)
 }
 
+fn is_special_cell(ch: char) -> bool {
+    matches!(
+        ch,
+        '█' | '▀'
+            | '▄'
+            | '▌'
+            | '▐'
+            | '▘'
+            | '▝'
+            | '▖'
+            | '▗'
+            | '▚'
+            | '▞'
+            | '▙'
+            | '▛'
+            | '▜'
+            | '▟'
+            | '░'
+            | '▒'
+            | '▓'
+    ) || box_segments(ch).is_some()
+}
+
 fn fill_cell(
     frame: &mut [u8],
     width: usize,
@@ -514,11 +767,11 @@ fn draw_glyph_bitmap(
             continue;
         }
         for x in 0..glyph.width {
-            let cell_px = glyph.left + x as i16 + paint.x_shift;
-            if !(0..glyph_metrics.cell_width as i16).contains(&cell_px) {
+            let cell_px = glyph.left as f32 + x as f32 + paint.x_shift;
+            if cell_px < 0.0 || cell_px >= glyph_metrics.cell_width as f32 {
                 continue;
             }
-            let frame_x = origin_x as i32 + i32::from(cell_px);
+            let frame_x = origin_x as i32 + cell_px.floor() as i32;
             if frame_x < 0 || frame_x >= width as i32 {
                 continue;
             }
@@ -642,7 +895,7 @@ mod tests {
             &glyph,
             GlyphPaint {
                 color: [255, 255, 255],
-                x_shift: 0,
+                x_shift: 0.0,
                 origin_metrics: metrics,
                 glyph_metrics: metrics,
             },
@@ -654,6 +907,31 @@ mod tests {
                 .chunks_exact(4)
                 .all(|pixel| pixel[..3] == [0, 0, 0])
         );
+    }
+
+    #[test]
+    fn shaping_guard_skips_plain_words_and_accepts_ligature_candidates() {
+        assert!(!may_need_shaping("plainWord123"));
+        assert!(may_need_shaping("=>"));
+        assert!(may_need_shaping("office"));
+        assert!(may_need_shaping("λx"));
+    }
+
+    #[test]
+    fn shapable_cells_exclude_terminal_geometry_and_wide_cells() {
+        assert!(is_shapable_cell(Cell {
+            ch: 'a',
+            ..Cell::default()
+        }));
+        assert!(!is_shapable_cell(Cell {
+            ch: '─',
+            ..Cell::default()
+        }));
+        assert!(!is_shapable_cell(Cell {
+            ch: '表',
+            wide: true,
+            ..Cell::default()
+        }));
     }
 }
 
