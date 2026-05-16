@@ -140,6 +140,34 @@ fn ignored_c0_controls_do_not_split_or_pollute_printed_text() {
 }
 
 #[test]
+fn osc_window_title_is_ignored_without_polluting_grid() {
+    let mut terminal = TerminalCore::new(4, 1);
+    feed(&mut terminal, b"\x1b]0;title\x07AB");
+
+    assert_screen(&terminal, &["AB  "]);
+}
+
+#[test]
+fn osc8_hyperlink_wrappers_do_not_print_control_payload() {
+    let mut terminal = TerminalCore::new(4, 1);
+    feed(
+        &mut terminal,
+        b"A\x1b]8;;https://example.com\x1b\\B\x1b]8;;\x1b\\C",
+    );
+
+    assert_screen(&terminal, &["ABC "]);
+}
+
+#[test]
+fn horizontal_tab_advances_to_next_eight_column_stop() {
+    let mut terminal = TerminalCore::new(10, 1);
+    feed(&mut terminal, b"A\tB");
+
+    assert_screen(&terminal, &["A       B "]);
+    assert_eq!(terminal.grid().cursor().x, 9);
+}
+
+#[test]
 fn csi_leading_zeroes_and_empty_params_use_vt_defaults() {
     let mut terminal = TerminalCore::new(4, 3);
     feed(&mut terminal, b"\x1b[0002;0003HZ\x1b[;HY");
