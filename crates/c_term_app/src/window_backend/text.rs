@@ -26,6 +26,13 @@ struct ShapedGlyphKey {
     glyph_id: u16,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FontLookupKey {
+    ch: char,
+    bold: bool,
+    italic: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FontRole {
     Regular,
@@ -58,6 +65,8 @@ struct GlyphBitmap {
 
 pub(super) struct TextRenderer {
     fonts: Vec<LoadedFont>,
+    ascii_font_lookup: [[Option<Option<usize>>; 128]; 4],
+    extended_font_lookup: HashMap<FontLookupKey, Option<usize>>,
     glyphs: HashMap<GlyphKey, GlyphBitmap>,
     shaped_glyphs: HashMap<ShapedGlyphKey, GlyphBitmap>,
     metrics: TerminalMetrics,
@@ -104,6 +113,8 @@ impl TextRenderer {
     ) -> Self {
         Self {
             fonts: load_fonts(font),
+            ascii_font_lookup: [[None; 128]; 4],
+            extended_font_lookup: HashMap::new(),
             glyphs: HashMap::new(),
             shaped_glyphs: HashMap::new(),
             metrics,
@@ -174,6 +185,10 @@ impl TextRenderer {
         while x < cols {
             let cell = row.get(usize::from(x)).copied().unwrap_or_default();
             if cell.spacer {
+                x += 1;
+                continue;
+            }
+            if cell.ch == ' ' && !cell.style.underline {
                 x += 1;
                 continue;
             }
@@ -299,7 +314,7 @@ impl TextRenderer {
     }
 
     fn display_columns(
-        &self,
+        &mut self,
         row: &[Cell],
         x: u16,
         cols: u16,
@@ -395,19 +410,18 @@ impl TextRenderer {
         }
     }
 
-    fn glyph_key(&self, ch: char, style: Style, columns: u16) -> Option<GlyphKey> {
+    fn glyph_key(&mut self, ch: char, style: Style, columns: u16) -> Option<GlyphKey> {
         let columns = columns.min(u16::from(u8::MAX)) as u8;
-        let roles = preferred_font_roles(style);
-        self.font_index(ch, roles)
+        self.font_index_for_char(ch, style)
             .map(|font| GlyphKey { font, ch, columns })
             .or_else(|| {
                 ascii_glyph_fallback(ch).and_then(|ch| {
-                    self.font_index(ch, roles)
+                    self.font_index_for_char(ch, style)
                         .map(|font| GlyphKey { font, ch, columns })
                 })
             })
             .or_else(|| {
-                self.font_index('?', roles).map(|font| GlyphKey {
+                self.font_index_for_char('?', style).map(|font| GlyphKey {
                     font,
                     ch: '?',
                     columns,
@@ -415,7 +429,34 @@ impl TextRenderer {
             })
     }
 
-    fn font_index(&self, ch: char, roles: &[FontRole]) -> Option<usize> {
+    fn font_index_for_char(&mut self, ch: char, style: Style) -> Option<usize> {
+        if ch.is_ascii() {
+            let style_index = font_style_index(style);
+            let ch_index = ch as usize;
+            if let Some(index) = self.ascii_font_lookup[style_index][ch_index] {
+                return index;
+            }
+
+            let index = self.find_font_index(ch, preferred_font_roles(style));
+            self.ascii_font_lookup[style_index][ch_index] = Some(index);
+            return index;
+        }
+
+        let key = FontLookupKey {
+            ch,
+            bold: style.bold,
+            italic: style.italic,
+        };
+        if let Some(index) = self.extended_font_lookup.get(&key) {
+            return *index;
+        }
+
+        let index = self.find_font_index(ch, preferred_font_roles(style));
+        self.extended_font_lookup.insert(key, index);
+        index
+    }
+
+    fn find_font_index(&self, ch: char, roles: &[FontRole]) -> Option<usize> {
         for role in roles {
             if let Some(index) = self
                 .fonts
@@ -600,6 +641,10 @@ fn preferred_font_roles(style: Style) -> &'static [FontRole] {
         (false, true) => &[FontRole::Italic, FontRole::BoldItalic, FontRole::Regular],
         (false, false) => &[FontRole::Regular],
     }
+}
+
+fn font_style_index(style: Style) -> usize {
+    usize::from(style.bold) | (usize::from(style.italic) << 1)
 }
 
 fn font_role_from_path(path: &str) -> FontRole {
@@ -834,7 +879,16 @@ fn draw_glyph_bitmap(
                 continue;
             }
             let index = ((origin_y + cell_py as usize) * width + frame_x as usize) * 4;
-            blend_pixel(&mut frame[index..index + 4], paint.color, alpha);
+            if alpha == u8::MAX {
+                frame[index..index + 4].copy_from_slice(&[
+                    paint.color[0],
+                    paint.color[1],
+                    paint.color[2],
+                    0xff,
+                ]);
+            } else {
+                blend_pixel(&mut frame[index..index + 4], paint.color, alpha);
+            }
         }
     }
 }
@@ -930,11 +984,12 @@ fn draw_special_cell(
     ch: char,
     paint: CellPaint,
 ) -> bool {
-    draw_block_cell(frame, width, cell_x, cell_y, ch, paint)
-        || draw_shade_cell(frame, width, cell_x, cell_y, ch, paint)
-        || draw_box_cell(frame, width, cell_x, cell_y, ch, paint)
+    draw_block_cell_inner(frame, width, cell_x, cell_y, ch, paint, false)
+        || draw_shade_cell_inner(frame, width, cell_x, cell_y, ch, paint, false)
+        || draw_box_cell_inner(frame, width, cell_x, cell_y, ch, paint, false)
 }
 
+#[cfg(test)]
 pub(super) fn draw_block_cell(
     frame: &mut [u8],
     width: usize,
@@ -942,6 +997,18 @@ pub(super) fn draw_block_cell(
     cell_y: u16,
     ch: char,
     paint: CellPaint,
+) -> bool {
+    draw_block_cell_inner(frame, width, cell_x, cell_y, ch, paint, true)
+}
+
+fn draw_block_cell_inner(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    ch: char,
+    paint: CellPaint,
+    fill_background: bool,
 ) -> bool {
     let metrics = paint.metrics;
     let cell_width = metrics.cell_width as usize;
@@ -1032,7 +1099,9 @@ pub(super) fn draw_block_cell(
         _ => return false,
     };
 
-    fill_cell(frame, width, cell_x, cell_y, paint.bg, metrics);
+    if fill_background {
+        fill_cell(frame, width, cell_x, cell_y, paint.bg, metrics);
+    }
     let origin_x = usize::from(cell_x) * metrics.cell_width as usize;
     let origin_y = usize::from(cell_y) * metrics.cell_height as usize;
     for &(x, y, region_width, region_height) in &regions[..region_count] {
@@ -1051,6 +1120,7 @@ pub(super) fn draw_block_cell(
     true
 }
 
+#[cfg(test)]
 pub(super) fn draw_shade_cell(
     frame: &mut [u8],
     width: usize,
@@ -1058,6 +1128,18 @@ pub(super) fn draw_shade_cell(
     cell_y: u16,
     ch: char,
     paint: CellPaint,
+) -> bool {
+    draw_shade_cell_inner(frame, width, cell_x, cell_y, ch, paint, true)
+}
+
+fn draw_shade_cell_inner(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    ch: char,
+    paint: CellPaint,
+    fill_background: bool,
 ) -> bool {
     let metrics = paint.metrics;
     let threshold = match ch {
@@ -1071,6 +1153,9 @@ pub(super) fn draw_shade_cell(
     for py in 0..metrics.cell_height as usize {
         for px in 0..metrics.cell_width as usize {
             let pattern = (px + py * 3) & 3;
+            if pattern >= threshold && !fill_background {
+                continue;
+            }
             let color = if pattern < threshold {
                 paint.fg
             } else {
@@ -1083,6 +1168,7 @@ pub(super) fn draw_shade_cell(
     true
 }
 
+#[cfg(test)]
 pub(super) fn draw_box_cell(
     frame: &mut [u8],
     width: usize,
@@ -1090,6 +1176,18 @@ pub(super) fn draw_box_cell(
     cell_y: u16,
     ch: char,
     paint: CellPaint,
+) -> bool {
+    draw_box_cell_inner(frame, width, cell_x, cell_y, ch, paint, true)
+}
+
+fn draw_box_cell_inner(
+    frame: &mut [u8],
+    width: usize,
+    cell_x: u16,
+    cell_y: u16,
+    ch: char,
+    paint: CellPaint,
+    fill_background: bool,
 ) -> bool {
     let metrics = paint.metrics;
     let Some((left, right, up, down)) = box_segments(ch) else {
@@ -1107,6 +1205,9 @@ pub(super) fn draw_box_cell(
                 && ((left && px <= center_x) || (right && px >= center_x));
             let vertical = px.abs_diff(center_x) < thickness
                 && ((up && py <= center_y) || (down && py >= center_y));
+            if !(horizontal || vertical || fill_background) {
+                continue;
+            }
             let color = if horizontal || vertical {
                 paint.fg
             } else {
