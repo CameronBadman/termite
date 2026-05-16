@@ -157,6 +157,10 @@ where
     }
 
     fn process_fast_sgr(&mut self, input: &[u8]) -> Option<usize> {
+        if let Some(len) = self.process_simple_fast_sgr(input) {
+            return Some(len);
+        }
+
         let params = input.strip_prefix(b"\x1b[")?;
         let end = params.iter().position(|byte| *byte == b'm')?;
         if !params[..end]
@@ -180,6 +184,64 @@ where
             self.apply_fast_sgr_code(code)?;
         }
         Some(end + 3)
+    }
+
+    fn process_simple_fast_sgr(&mut self, input: &[u8]) -> Option<usize> {
+        match input {
+            [0x1b, b'[', b'0', b'm', ..] => {
+                self.style = Style::default();
+                Some(4)
+            }
+            [0x1b, b'[', b'1', b'm', ..] => {
+                self.style.bold = true;
+                Some(4)
+            }
+            [0x1b, b'[', b'3', b'm', ..] => {
+                self.style.italic = true;
+                Some(4)
+            }
+            [0x1b, b'[', b'4', b'm', ..] => {
+                self.style.underline = true;
+                Some(4)
+            }
+            [0x1b, b'[', b'3', digit @ b'0'..=b'7', b'm', ..] => {
+                self.style.foreground = crate::Color::Indexed(digit - b'0');
+                Some(5)
+            }
+            [0x1b, b'[', b'4', digit @ b'0'..=b'7', b'm', ..] => {
+                self.style.background = crate::Color::Indexed(digit - b'0');
+                Some(5)
+            }
+            [0x1b, b'[', b'9', digit @ b'0'..=b'7', b'm', ..] => {
+                self.style.foreground = crate::Color::Indexed(digit - b'0' + 8);
+                Some(5)
+            }
+            [0x1b, b'[', b'3', b'9', b'm', ..] => {
+                self.style.foreground = crate::Color::DefaultForeground;
+                Some(5)
+            }
+            [0x1b, b'[', b'4', b'9', b'm', ..] => {
+                self.style.background = crate::Color::DefaultBackground;
+                Some(5)
+            }
+            [0x1b, b'[', b'2', b'2', b'm', ..] => {
+                self.style.bold = false;
+                Some(5)
+            }
+            [0x1b, b'[', b'2', b'3', b'm', ..] => {
+                self.style.italic = false;
+                Some(5)
+            }
+            [0x1b, b'[', b'2', b'4', b'm', ..] => {
+                self.style.underline = false;
+                Some(5)
+            }
+            [0x1b, b'[', b'1', b'0', digit @ b'0'..=b'7', b'm', ..] => {
+                self.style.background = crate::Color::Indexed(digit - b'0' + 8);
+                Some(6)
+            }
+            _ => None,
+        }
     }
 
     fn apply_fast_sgr_code(&mut self, code: u16) -> Option<()> {
@@ -212,8 +274,15 @@ where
                 {
                     index += 1;
                 }
-                self.grid.put_ascii_run(&input[start..index], self.style);
+                let run = &input[start..index];
                 self.last_printed = char::from(input[index - 1]);
+                if input.get(index..index + 2) == Some(b"\r\n")
+                    && self.grid.put_ascii_run_crlf(run, self.style)
+                {
+                    index += 2;
+                    continue;
+                }
+                self.grid.put_ascii_run(run, self.style);
                 continue;
             }
             if let Some(ch) = decode_utf8_char(input, index)

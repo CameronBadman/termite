@@ -268,6 +268,52 @@ impl Grid {
         }
     }
 
+    pub fn put_ascii_run_crlf(&mut self, bytes: &[u8], style: Style) -> bool {
+        if bytes.is_empty() || self.pending_wrap {
+            return false;
+        }
+
+        let x = self.cursor.x;
+        let y = self.cursor.y;
+        let count = bytes.len();
+        let available = usize::from(self.width.saturating_sub(x));
+        if count > available {
+            return false;
+        }
+        if self.row_may_have_wide_state(y) && self.row_range_has_wide_state(y, x, count as u16) {
+            return false;
+        }
+
+        let Some(start) = self.index(x, y) else {
+            return false;
+        };
+        for (cell, byte) in self.cells[start..start + count].iter_mut().zip(bytes) {
+            *cell = Cell {
+                ch: char::from(*byte),
+                style,
+                wide: false,
+                spacer: false,
+            };
+        }
+        self.mark_line_damage(y, x, count as u16);
+
+        let old = self.cursor;
+        self.cursor.x = 0;
+        if self.cursor.y == self.scroll_bottom {
+            self.scroll_up_region();
+        } else {
+            self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
+        }
+        if old != self.cursor {
+            self.generation += 1;
+            self.damage.mark(DamageRegion::Cursor {
+                old: Some((old.x, old.y)),
+                new: (self.cursor.x, self.cursor.y),
+            });
+        }
+        true
+    }
+
     pub fn put_tab(&mut self, style: Style) {
         let next_stop = ((self.cursor.x / 8) + 1) * 8;
         let spaces = next_stop.saturating_sub(self.cursor.x).max(1);
