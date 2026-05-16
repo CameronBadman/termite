@@ -176,7 +176,7 @@ impl Grid {
                     ch: ' ',
                     style,
                     wide: false,
-                    spacer: true,
+                    spacer: false,
                 };
                 let changed = self.replace_cell(x, y, cell);
                 self.pending_wrap = true;
@@ -660,8 +660,14 @@ impl Grid {
         let mut changed = self.cells[row_start + x..row_end]
             .iter()
             .any(|cell| *cell != Cell::default());
-        let (_, _, boundary_changed) = self.clear_cell_for_write(self.cursor.x, self.cursor.y);
-        changed |= boundary_changed;
+        if !right
+            || self
+                .cell(self.cursor.x, self.cursor.y)
+                .is_some_and(|cell| cell.spacer)
+        {
+            let (_, _, boundary_changed) = self.clear_cell_for_write(self.cursor.x, self.cursor.y);
+            changed |= boundary_changed;
+        }
 
         if right {
             self.cells
