@@ -203,7 +203,7 @@ impl WindowBackend {
         self.renderer = Some(renderer);
         self.child = Some(child);
         self.window = Some(window);
-        self.mark_dirty();
+        self.schedule_delayed_render(Instant::now());
         Ok(())
     }
 
@@ -939,6 +939,23 @@ impl PerfStats {
         if elapsed < Duration::from_secs(1) {
             return;
         }
+        self.report_elapsed(elapsed);
+    }
+
+    fn report_final(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        if self.pty_events == 0 && self.frames == 0 {
+            return;
+        }
+        self.report_elapsed(self.interval_start.elapsed());
+    }
+
+    fn report_elapsed(&mut self, elapsed: Duration) {
+        if elapsed.is_zero() {
+            return;
+        }
 
         let seconds = elapsed.as_secs_f64();
         let mib = self.pty_bytes as f64 / (1024.0 * 1024.0);
@@ -985,7 +1002,10 @@ impl ApplicationHandler<UserEvent> for WindowBackend {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyBytes(bytes) => self.handle_pty_bytes(bytes),
-            UserEvent::ChildExited => event_loop.exit(),
+            UserEvent::ChildExited => {
+                self.perf.report_final();
+                event_loop.exit();
+            }
         }
     }
 
