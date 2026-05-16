@@ -1141,6 +1141,11 @@ fn cursor_uniform(grid: &Grid, metrics: TerminalMetrics) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        hint::black_box,
+        time::{Duration, Instant},
+    };
+
     use super::text::{
         CellPaint, ascii_glyph_fallback, bitmap_glyph, box_segments, draw_block_cell,
         draw_box_cell, draw_shade_cell, sample_bitmap_axis,
@@ -1148,6 +1153,10 @@ mod tests {
     use super::*;
     use crate::window_backend::render_cache::frame_len;
     use c_term_core::TerminalCore;
+
+    const BENCH_COLS: u16 = 120;
+    const BENCH_ROWS: u16 = 36;
+    const BENCH_CHUNK: usize = 8192;
 
     #[test]
     fn box_drawing_characters_are_drawn_without_font_fallback() {
@@ -1378,5 +1387,104 @@ mod tests {
 
         assert_eq!(cache.scroll_start, Some(0));
         assert!(!cache.dirty);
+    }
+
+    #[test]
+    #[ignore]
+    fn render_cache_bench() {
+        let (_, _, font, metrics, theme, _, text_render) = crate::config::runner().into_parts();
+        let workloads = [
+            ("plain-scroll", bench_payload_plain_scroll()),
+            ("color-table", bench_payload_color_table()),
+            ("unicode", bench_payload_unicode()),
+        ];
+
+        println!(
+            "{:<14} {:>9} {:>10} {:>10} {:>10}",
+            "workload", "bytes", "core+draw", "draw-only", "updates"
+        );
+        for (name, payload) in workloads {
+            let result = run_render_bench(&payload, font.clone(), metrics, theme, text_render);
+            println!(
+                "{:<14} {:>9} {:>9.2}ms {:>9.2}ms {:>10}",
+                name,
+                payload.len(),
+                result.total.as_secs_f64() * 1000.0,
+                result.draw.as_secs_f64() * 1000.0,
+                result.updates
+            );
+        }
+    }
+
+    struct RenderBenchResult {
+        total: Duration,
+        draw: Duration,
+        updates: usize,
+    }
+
+    fn run_render_bench(
+        payload: &[u8],
+        font: FontConfig,
+        metrics: TerminalMetrics,
+        theme: Theme,
+        text_render: TextRenderConfig,
+    ) -> RenderBenchResult {
+        let mut terminal = TerminalCore::new(BENCH_COLS, BENCH_ROWS);
+        let mut cache = RenderCache::new(font, theme, metrics, text_render);
+        let started = Instant::now();
+        let mut draw = Duration::ZERO;
+        let mut updates = 0;
+
+        for chunk in payload.chunks(BENCH_CHUNK) {
+            let tick = terminal.process_pty_input(chunk);
+            cache.apply_damage(&tick.damage, terminal.grid().height());
+            let draw_started = Instant::now();
+            let frame = cache.update(terminal.grid());
+            black_box(frame.len());
+            let update = cache.take_texture_update(terminal.grid().height());
+            black_box(update.full);
+            black_box(update.rows.len());
+            black_box(update.scrolls.len());
+            draw += draw_started.elapsed();
+            updates += 1;
+        }
+
+        RenderBenchResult {
+            total: started.elapsed(),
+            draw,
+            updates,
+        }
+    }
+
+    fn bench_payload_plain_scroll() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for i in 0..30_000 {
+            bytes.extend_from_slice(
+                format!("render line {i:05} abcdefghijklmnopqrstuvwxyz\r\n").as_bytes(),
+            );
+        }
+        bytes
+    }
+
+    fn bench_payload_color_table() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for row in 0..12_000 {
+            for color in 0..16 {
+                bytes.extend_from_slice(
+                    format!("\x1b[{}m{:02x} ", 30 + color % 8, row + color).as_bytes(),
+                );
+            }
+            bytes.extend_from_slice(b"\x1b[0m\r\n");
+        }
+        bytes
+    }
+
+    fn bench_payload_unicode() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let sample = "unicode 表 λ π ┌─┐ █ ░ we’ll — ok\r\n";
+        for _ in 0..25_000 {
+            bytes.extend_from_slice(sample.as_bytes());
+        }
+        bytes
     }
 }
