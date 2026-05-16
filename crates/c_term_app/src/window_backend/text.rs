@@ -87,6 +87,14 @@ struct ShapedGlyph {
     synthetic_bold: bool,
 }
 
+#[derive(Clone, Copy)]
+struct TextRun {
+    x: u16,
+    y: u16,
+    end: u16,
+    first: Cell,
+}
+
 impl TextRenderer {
     pub(super) fn new(
         font: FontConfig,
@@ -207,7 +215,7 @@ impl TextRenderer {
 
         if needs_shaping
             && end - x >= 2
-            && self.draw_shaped_text_run(row, frame, width, x, y, end, first)
+            && self.draw_shaped_text_run(row, frame, width, TextRun { x, y, end, first })
         {
             return end;
         }
@@ -224,35 +232,32 @@ impl TextRenderer {
         row: &[Cell],
         frame: &mut [u8],
         width: usize,
-        x: u16,
-        y: u16,
-        end: u16,
-        first: Cell,
+        run: TextRun,
     ) -> bool {
-        let text = row[usize::from(x)..usize::from(end)]
+        let text = row[usize::from(run.x)..usize::from(run.end)]
             .iter()
             .map(|cell| cell.ch)
             .collect::<String>();
-        let Some(font) = self.shaping_font_index(&text, first.style) else {
+        let Some(font) = self.shaping_font_index(&text, run.first.style) else {
             return false;
         };
-        let Some(glyphs) = self.shape_text(font, &text, end - x, first.style) else {
+        let Some(glyphs) = self.shape_text(font, &text, run.end - run.x, run.first.style) else {
             return false;
         };
         if glyphs.is_empty() {
             return false;
         }
 
-        let fg = self.theme.color(first.style.foreground);
-        let glyph_metrics = glyph_metrics(self.metrics, end - x);
+        let fg = self.theme.color(run.first.style.foreground);
+        let glyph_metrics = glyph_metrics(self.metrics, run.end - run.x);
         for glyph in glyphs {
             self.ensure_shaped_glyph(glyph.key, self.metrics);
             if let Some(bitmap) = self.shaped_glyphs.get(&glyph.key) {
                 draw_glyph_bitmap(
                     frame,
                     width,
-                    x,
-                    y,
+                    run.x,
+                    run.y,
                     bitmap,
                     GlyphPaint {
                         color: fg,
@@ -265,8 +270,8 @@ impl TextRenderer {
                     draw_glyph_bitmap(
                         frame,
                         width,
-                        x,
-                        y,
+                        run.x,
+                        run.y,
                         bitmap,
                         GlyphPaint {
                             color: fg,
@@ -279,8 +284,16 @@ impl TextRenderer {
             }
         }
 
-        if first.style.underline {
-            draw_underline_span(frame, width, x, y, end - x, fg, self.metrics);
+        if run.first.style.underline {
+            draw_underline_span(
+                frame,
+                width,
+                run.x,
+                run.y,
+                run.end - run.x,
+                fg,
+                self.metrics,
+            );
         }
         true
     }
@@ -560,7 +573,6 @@ fn load_fonts(font: FontConfig) -> Vec<LoadedFont> {
 
     let mut loaded = Vec::new();
     for path in paths {
-        let path = path;
         if let Ok(bytes) = fs::read(&path)
             && let Ok(font) = FontArc::try_from_vec(bytes.clone())
         {
@@ -910,74 +922,6 @@ fn draw_underline_span(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn glyph_bitmap_is_clipped_to_its_cell_span() {
-        let metrics = TerminalMetrics {
-            cell_width: 3,
-            cell_height: 1,
-        };
-        let mut frame = vec![0; 6 * 4];
-        let glyph = GlyphBitmap {
-            left: 2,
-            top: 0,
-            width: 3,
-            height: 1,
-            alpha: vec![255; 3],
-        };
-
-        draw_glyph_bitmap(
-            &mut frame,
-            6,
-            0,
-            0,
-            &glyph,
-            GlyphPaint {
-                color: [255, 255, 255],
-                x_shift: 0.0,
-                origin_metrics: metrics,
-                glyph_metrics: metrics,
-            },
-        );
-
-        assert_eq!(&frame[2 * 4..2 * 4 + 3], &[255, 255, 255]);
-        assert!(
-            frame[3 * 4..]
-                .chunks_exact(4)
-                .all(|pixel| pixel[..3] == [0, 0, 0])
-        );
-    }
-
-    #[test]
-    fn shaping_guard_skips_plain_words_and_accepts_ligature_candidates() {
-        assert!(!may_need_shaping("plainWord123"));
-        assert!(!may_need_shaping("a=b.c-d/e"));
-        assert!(may_need_shaping("=>"));
-        assert!(may_need_shaping("office"));
-        assert!(may_need_shaping("λx"));
-    }
-
-    #[test]
-    fn shapable_cells_exclude_terminal_geometry_and_wide_cells() {
-        assert!(is_shapable_cell(Cell {
-            ch: 'a',
-            ..Cell::default()
-        }));
-        assert!(!is_shapable_cell(Cell {
-            ch: '─',
-            ..Cell::default()
-        }));
-        assert!(!is_shapable_cell(Cell {
-            ch: '表',
-            wide: true,
-            ..Cell::default()
-        }));
-    }
-}
-
 fn draw_special_cell(
     frame: &mut [u8],
     width: usize,
@@ -1197,5 +1141,73 @@ pub(super) fn box_segments(ch: char) -> Option<(bool, bool, bool, bool)> {
         '┴' | '┻' => Some((true, true, true, false)),
         '┼' | '╋' => Some((true, true, true, true)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glyph_bitmap_is_clipped_to_its_cell_span() {
+        let metrics = TerminalMetrics {
+            cell_width: 3,
+            cell_height: 1,
+        };
+        let mut frame = vec![0; 6 * 4];
+        let glyph = GlyphBitmap {
+            left: 2,
+            top: 0,
+            width: 3,
+            height: 1,
+            alpha: vec![255; 3],
+        };
+
+        draw_glyph_bitmap(
+            &mut frame,
+            6,
+            0,
+            0,
+            &glyph,
+            GlyphPaint {
+                color: [255, 255, 255],
+                x_shift: 0.0,
+                origin_metrics: metrics,
+                glyph_metrics: metrics,
+            },
+        );
+
+        assert_eq!(&frame[2 * 4..2 * 4 + 3], &[255, 255, 255]);
+        assert!(
+            frame[3 * 4..]
+                .chunks_exact(4)
+                .all(|pixel| pixel[..3] == [0, 0, 0])
+        );
+    }
+
+    #[test]
+    fn shaping_guard_skips_plain_words_and_accepts_ligature_candidates() {
+        assert!(!may_need_shaping("plainWord123"));
+        assert!(!may_need_shaping("a=b.c-d/e"));
+        assert!(may_need_shaping("=>"));
+        assert!(may_need_shaping("office"));
+        assert!(may_need_shaping("λx"));
+    }
+
+    #[test]
+    fn shapable_cells_exclude_terminal_geometry_and_wide_cells() {
+        assert!(is_shapable_cell(Cell {
+            ch: 'a',
+            ..Cell::default()
+        }));
+        assert!(!is_shapable_cell(Cell {
+            ch: '─',
+            ..Cell::default()
+        }));
+        assert!(!is_shapable_cell(Cell {
+            ch: '表',
+            wide: true,
+            ..Cell::default()
+        }));
     }
 }
