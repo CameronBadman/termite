@@ -254,20 +254,15 @@ impl Grid {
                 return;
             };
             let row = &mut self.cells[start..start + count];
-            let mut changed = false;
             for (cell, byte) in row.iter_mut().zip(&bytes[offset..offset + count]) {
-                let next = Cell {
+                *cell = Cell {
                     ch: char::from(*byte),
                     style,
                     wide: false,
                     spacer: false,
                 };
-                changed |= *cell != next;
-                *cell = next;
             }
-            if changed {
-                self.mark_line_damage(y, x, count as u16);
-            }
+            self.mark_line_damage(y, x, count as u16);
             self.advance_cursor(count as u16);
             offset += count;
         }
