@@ -636,7 +636,8 @@ impl Grid {
     }
 
     pub fn drain_scrolled_rows(&mut self) -> Vec<Vec<Cell>> {
-        std::mem::take(&mut self.scrolled_rows)
+        let capacity = self.scrolled_rows.capacity();
+        std::mem::replace(&mut self.scrolled_rows, Vec::with_capacity(capacity))
     }
 
     pub fn recycle_scrolled_rows(&mut self, rows: impl IntoIterator<Item = Vec<Cell>>) {
