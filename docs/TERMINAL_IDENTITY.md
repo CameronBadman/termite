@@ -17,7 +17,7 @@ TERM_PROGRAM_VERSION=0.1.0
 Switching to `TERM=termite` before users have installed a terminfo entry would
 make basic programs fail or degrade.
 
-Termite-specific identity is centralized in `c_term_core::identity`.
+Termite-specific identity is centralized in `termite_core::identity`.
 
 That module defines:
 
@@ -78,8 +78,8 @@ User shortcut path:
 OSC 52 path:
 
 - Applications emit `OSC 52`.
-- `c_term_core` parses the sequence into a clipboard event.
-- `c_term_app` decodes the base64 payload.
+- `termite_core` parses the sequence into a clipboard event.
+- `termite` decodes the base64 payload.
 - The decoded text is written to the Wayland clipboard.
 
 Tmux uses the OSC 52 path for copy mode. Tmux 3.5a enables clipboard support for

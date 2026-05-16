@@ -38,7 +38,7 @@ impl Plugin for ScreenOpacity {
 mod tests {
     use std::time::Instant;
 
-    use c_term_core::TerminalCore;
+    use termite_core::TerminalCore;
 
     use super::*;
 

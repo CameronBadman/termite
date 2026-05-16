@@ -1,4 +1,4 @@
-use c_term_core::{Cell, DamageBatch, DamageRegion, Grid, TerminalCore};
+use termite_core::{Cell, DamageBatch, DamageRegion, Grid, TerminalCore};
 
 use crate::{
     runner::{FontConfig, TerminalMetrics, TextRenderConfig},

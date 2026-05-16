@@ -11,11 +11,11 @@ use nix::{
     unistd::execvp,
 };
 
-use c_term_core::{PROGRAM, PROGRAM_VERSION, TERM};
+use termite_core::{PROGRAM, PROGRAM_VERSION, TERM};
 
 fn main() {
     if let Err(error) = config::runner().run() {
-        eprintln!("c-term: {error}");
+        eprintln!("termite: {error}");
         std::process::exit(1);
     }
 }

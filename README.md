@@ -47,7 +47,7 @@ Current gaps:
 Build and run the terminal:
 
 ```bash
-cargo run --release -p c_term_app
+cargo run --release -p termite
 ```
 
 Exit the shell normally with `exit` or Ctrl-D. Ctrl-Q is also handled as an
@@ -89,7 +89,7 @@ Termite uses compiled Rust configuration instead of a runtime config file. The
 main config lives in:
 
 ```text
-crates/c_term_app/src/config.rs
+crates/termite/src/config.rs
 ```
 
 The default config composes font choice, cell metrics, theme colors, text
@@ -117,9 +117,9 @@ API, font stack options, theme structure, and zoom behavior.
 
 The workspace is split into two crates:
 
-- `c_term_core`: VTE parsing, grid state, scrollback, terminal modes, terminal
+- `termite_core`: VTE parsing, grid state, scrollback, terminal modes, terminal
   identity, and damage tracking.
-- `c_term_app`: Wayland windowing, PTY integration, input encoding, clipboard,
+- `termite`: Wayland windowing, PTY integration, input encoding, clipboard,
   render cache, GPU presentation, compiled config, and plugins.
 
 PTY bytes flow into `TerminalCore`. The core returns a `CoreTick` containing
@@ -136,7 +136,7 @@ into the repo.
 Core parser/grid replay:
 
 ```bash
-cargo run --release -p c_term_core --bin core_perf
+cargo run --release -p termite_core --bin core_perf
 ```
 
 End-to-end terminal comparison suite:
@@ -154,7 +154,7 @@ RUNS=3 LINES=30000 HUGE_LINES=120000 IDLE_SECONDS=10 scripts/bench_terminals.sh
 Live runtime timing:
 
 ```bash
-TERMITE_PERF=1 cargo run --release -p c_term_app
+TERMITE_PERF=1 cargo run --release -p termite
 ```
 
 `TERMITE_PERF` reports PTY throughput, frame counts, texture upload counts,

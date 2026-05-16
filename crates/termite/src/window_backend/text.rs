@@ -1,12 +1,12 @@
 use std::{collections::HashMap, fs};
 
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
-use c_term_core::{Cell, Color, Style};
 use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
     SGA_FONTS, UnicodeFonts,
 };
 use rustybuzz::{Face, UnicodeBuffer};
+use termite_core::{Cell, Color, Style};
 
 use crate::{
     runner::{FontConfig, TerminalMetrics, TextRenderConfig},

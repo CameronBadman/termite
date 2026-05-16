@@ -30,7 +30,7 @@ chmod +x "$bench_shell"
 payload_bytes="$(wc -c < "$payload")"
 printf 'payload: %s lines, %s bytes\n' "$lines" "$payload_bytes"
 
-cargo build --release -p c_term_app >/dev/null
+cargo build --release -p termite >/dev/null
 
 measure() {
     local label="$1"
@@ -71,5 +71,5 @@ measure() {
     fi
 }
 
-measure "termite" env SHELL="$bench_shell" "$repo/target/release/c_term_app"
+measure "termite" env SHELL="$bench_shell" "$repo/target/release/termite"
 measure "kitty" kitty --config NONE --class termite-kitty-bench --title termite-kitty-bench "$bench_shell"

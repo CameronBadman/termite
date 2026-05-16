@@ -61,7 +61,7 @@ impl GpuRenderer {
         }))?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("c-term device"),
+                label: Some("termite device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()
@@ -77,11 +77,11 @@ impl GpuRenderer {
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("c-term blit shader"),
+            label: Some("termite blit shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BLIT_SHADER)),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("c-term blit pipeline"),
+            label: Some("termite blit pipeline"),
             layout: None,
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -103,13 +103,13 @@ impl GpuRenderer {
         });
 
         let cursor_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("c-term global uniform"),
+            label: Some("termite global uniform"),
             size: 64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
         let overlay_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("c-term overlay storage"),
+            label: Some("termite overlay storage"),
             size: (MAX_OVERLAYS * OVERLAY_BYTES) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
@@ -309,7 +309,7 @@ impl GpuRenderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("c-term scroll copy encoder"),
+                label: Some("termite scroll copy encoder"),
             });
         for scroll in scrolls {
             let rows = scroll.bottom.saturating_sub(scroll.top).saturating_add(1);
@@ -405,11 +405,11 @@ impl GpuRenderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("c-term render encoder"),
+                label: Some("termite render encoder"),
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("c-term render pass"),
+                label: Some("termite render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -436,7 +436,7 @@ impl GpuRenderer {
 
 fn create_frame_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("c-term frame texture"),
+        label: Some("termite frame texture"),
         size: wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),
@@ -455,7 +455,7 @@ fn create_frame_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
 
 fn create_scratch_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("c-term scroll scratch texture"),
+        label: Some("termite scroll scratch texture"),
         size: wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),
@@ -480,7 +480,7 @@ fn create_frame_bind_group(
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let layout = pipeline.get_bind_group_layout(0);
     device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("c-term frame bind group"),
+        label: Some("termite frame bind group"),
         layout: &layout,
         entries: &[
             wgpu::BindGroupEntry {

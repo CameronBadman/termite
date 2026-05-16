@@ -1,7 +1,7 @@
 # Compiled Config And Plugins
 
 Termite does not use a runtime config file. Configuration is Rust code in
-`crates/c_term_app/src/config.rs`.
+`crates/termite/src/config.rs`.
 
 This makes configuration explicit and type-checked. The tradeoff is that changes
 require a rebuild.
@@ -162,7 +162,7 @@ theme-aware automatic color by default.
 
 ## Adding A Plugin
 
-1. Add a module under `crates/c_term_app/src/plugins/`.
+1. Add a module under `crates/termite/src/plugins/`.
 2. Implement `Plugin`.
 3. Export it from `plugins.rs`.
 4. Add it to `terminal_plugins()` in `config.rs`.
@@ -170,4 +170,4 @@ theme-aware automatic color by default.
 
 Keep plugin state local to the plugin. If a feature needs to affect PTY input,
 terminal parsing, clipboard, or window lifecycle, it probably belongs in
-`window_backend` or `c_term_core`, not in a visual plugin.
+`window_backend` or `termite_core`, not in a visual plugin.

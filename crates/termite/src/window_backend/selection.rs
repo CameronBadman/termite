@@ -1,4 +1,4 @@
-use c_term_core::{Cell, TerminalCore};
+use termite_core::{Cell, TerminalCore};
 
 use crate::{
     plugins::{OverlayCommand, OverlayKind},

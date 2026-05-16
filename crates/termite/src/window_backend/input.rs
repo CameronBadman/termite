@@ -1,4 +1,4 @@
-use c_term_core::{MouseState, MouseTracking};
+use termite_core::{MouseState, MouseTracking};
 use winit::{
     dpi::PhysicalPosition,
     event::{KeyEvent, MouseButton, MouseScrollDelta},

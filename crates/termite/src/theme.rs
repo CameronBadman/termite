@@ -1,4 +1,4 @@
-use c_term_core::Color;
+use termite_core::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Theme {

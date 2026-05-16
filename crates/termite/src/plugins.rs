@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use c_term_core::Grid;
+use termite_core::Grid;
 
 use crate::{runner::TerminalMetrics, theme::Theme};
 
@@ -148,7 +148,7 @@ impl PluginHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use c_term_core::TerminalCore;
+    use termite_core::TerminalCore;
 
     fn frame_for<'a>(
         terminal: &'a TerminalCore,

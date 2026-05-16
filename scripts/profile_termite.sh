@@ -53,14 +53,14 @@ esac
 chmod +x "$child"
 
 printf 'building release terminal...\n'
-cargo build --release -p c_term_app >/dev/null
+cargo build --release -p termite >/dev/null
 
 printf 'payload=%s lines=%s bytes=%s\n' "$payload_kind" "$lines" "$(wc -c < "$payload")"
 printf 'log=%s\n' "$log"
 
 start="$(date +%s%N)"
 status=ok
-if ! TERMITE_PERF=1 timeout "$timeout_s" env SHELL="$child" "$repo/target/release/c_term_app" >"$log" 2>&1; then
+if ! TERMITE_PERF=1 timeout "$timeout_s" env SHELL="$child" "$repo/target/release/termite" >"$log" 2>&1; then
     status=fail
 fi
 elapsed_ns=$(($(date +%s%N) - start))

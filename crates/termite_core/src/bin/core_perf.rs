@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use c_term_core::TerminalCore;
+use termite_core::TerminalCore;
 
 const COLS: u16 = 100;
 const ROWS: u16 = 40;

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/c_term_app", "crates/c_term_core"]
+members = ["crates/termite", "crates/termite_core"]
 resolver = "3"
 
 [workspace.package]

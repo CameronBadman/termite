@@ -105,7 +105,7 @@ run_workload() {
     local child="$3"
 
     printf '\n== %s (%s bytes) ==\n' "$name" "$bytes"
-    measure_terminal "termite" "$child" env SHELL="$child" "$repo/target/release/c_term_app"
+    measure_terminal "termite" "$child" env SHELL="$child" "$repo/target/release/termite"
     if command -v foot >/dev/null 2>&1; then
         measure_terminal "foot" "$child" foot --app-id termite-foot-bench --title termite-foot-bench
     fi
@@ -201,10 +201,10 @@ gpu_idle_note() {
 }
 
 printf 'building release terminal...\n'
-cargo build --release -p c_term_app >/dev/null
+cargo build --release -p termite >/dev/null
 
 printf '\n== core replay ==\n'
-cargo run --release -p c_term_core --bin core_perf
+cargo run --release -p termite_core --bin core_perf
 
 ansi_payload="$(make_payload ansi "$lines")"
 unicode_payload="$(make_payload unicode "$lines")"
@@ -224,7 +224,7 @@ run_workload "nvim open+goto-end" "$(wc -c < "$ansi_payload")" "$nvim_child"
 
 printf '\n== idle cpu/rss (%ss) ==\n' "$idle_seconds"
 idle_child="$(make_child idle "sleep $((idle_seconds + 2))")"
-sample_idle "termite" "$idle_child" env SHELL="$idle_child" "$repo/target/release/c_term_app"
+sample_idle "termite" "$idle_child" env SHELL="$idle_child" "$repo/target/release/termite"
 if command -v foot >/dev/null 2>&1; then
     sample_idle "foot" "$idle_child" foot --app-id termite-foot-idle --title termite-foot-idle
 fi

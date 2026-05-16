@@ -7,7 +7,7 @@ Termite has two lightweight performance tools.
 Run parser/grid replay benchmarks without opening a window:
 
 ```bash
-cargo run --release -p c_term_core --bin core_perf
+cargo run --release -p termite_core --bin core_perf
 ```
 
 This prints throughput for plain scrolling, SGR-heavy output, cursor movement,
@@ -37,7 +37,7 @@ is reported only when a supported local tool is installed, such as
 Run the app with runtime timing enabled:
 
 ```bash
-TERMITE_PERF=1 cargo run --release -p c_term_app
+TERMITE_PERF=1 cargo run --release -p termite
 ```
 
 While the terminal is open, stress it with commands such as:

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use c_term_core::{Color, Cursor, CursorShape, Grid};
+use termite_core::{Color, Cursor, CursorShape, Grid};
 
 use crate::runner::TerminalMetrics;
 use crate::theme::Theme;
@@ -420,7 +420,7 @@ fn lift_color(color: [u8; 3], scale: f32, offset: u8) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use c_term_core::TerminalCore;
+    use termite_core::TerminalCore;
 
     fn frame_for<'a>(
         terminal: &'a TerminalCore,

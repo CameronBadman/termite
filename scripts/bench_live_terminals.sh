@@ -114,7 +114,7 @@ launch_terminal() {
     local log="$3"
     case "$label" in
         termite)
-            env SHELL="$child" "$repo/target/release/c_term_app" >"$log" 2>&1 &
+            env SHELL="$child" "$repo/target/release/termite" >"$log" 2>&1 &
             ;;
         foot)
             foot --app-id termite-foot-live --title termite-foot-live "$child" >"$log" 2>&1 &
@@ -235,7 +235,7 @@ measure_live_payload() {
 }
 
 printf 'building release terminal...\n'
-cargo build --release -p c_term_app >/dev/null
+cargo build --release -p termite >/dev/null
 
 ansi_payload="$(make_payload ansi "$lines")"
 unicode_payload="$(make_payload unicode "$lines")"

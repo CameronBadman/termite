@@ -10,7 +10,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use c_term_core::{
+use termite_core::{
     ClipboardStore, CursorShape, DamageBatch, Grid, MouseState, MouseTracking, TerminalCore,
 };
 use winit::{
@@ -175,7 +175,7 @@ impl WindowBackend {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("c-term")
+                    .with_title("termite")
                     .with_transparent(true)
                     .with_inner_size(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT))
                     .with_min_inner_size(LogicalSize::new(320, 200)),
@@ -284,7 +284,7 @@ impl WindowBackend {
         let mut options = wl_copy::Options::new();
         options.clipboard(clipboard);
         if let Err(error) = options.copy(source, wl_copy::MimeType::Text) {
-            eprintln!("c-term: failed to store OSC 52 clipboard text: {error}");
+            eprintln!("termite: failed to store OSC 52 clipboard text: {error}");
         }
     }
 
@@ -325,7 +325,7 @@ impl WindowBackend {
             && let Some(child) = &mut self.child
             && let Err(error) = child.master.write_all(&output)
         {
-            eprintln!("c-term: failed to write terminal response to PTY: {error}");
+            eprintln!("termite: failed to write terminal response to PTY: {error}");
         }
     }
 
@@ -348,7 +348,7 @@ impl WindowBackend {
         if let Some(child) = &mut self.child
             && let Err(error) = set_pty_winsize(child.master.as_raw_fd(), cols, rows)
         {
-            eprintln!("c-term: failed to resize PTY: {error}");
+            eprintln!("termite: failed to resize PTY: {error}");
         }
 
         if let Some(terminal) = &mut self.terminal {
@@ -403,7 +403,7 @@ impl WindowBackend {
         if self.persist_zoom
             && let Err(error) = store_zoom_steps(self.zoom_steps)
         {
-            eprintln!("c-term: failed to persist zoom setting: {error}");
+            eprintln!("termite: failed to persist zoom setting: {error}");
         }
     }
 
@@ -427,7 +427,7 @@ impl WindowBackend {
         if let Some(child) = &mut self.child
             && let Err(error) = set_pty_winsize(child.master.as_raw_fd(), cols, rows)
         {
-            eprintln!("c-term: failed to resize PTY after zoom: {error}");
+            eprintln!("termite: failed to resize PTY after zoom: {error}");
         }
         if let Some(terminal) = &mut self.terminal {
             let tick = terminal.resize_reflow(cols, rows);
@@ -529,7 +529,7 @@ impl WindowBackend {
         if let Some(child) = &mut self.child
             && let Err(error) = child.master.write_all(&bytes)
         {
-            eprintln!("c-term: failed to write key to PTY: {error}");
+            eprintln!("termite: failed to write key to PTY: {error}");
         }
     }
 
@@ -636,7 +636,7 @@ impl WindowBackend {
         if let Some(child) = &mut self.child
             && let Err(error) = child.master.write_all(&bytes)
         {
-            eprintln!("c-term: failed to write mouse event to PTY: {error}");
+            eprintln!("termite: failed to write mouse event to PTY: {error}");
         }
     }
 
@@ -658,7 +658,7 @@ impl WindowBackend {
         }
         let source = wl_copy::Source::Bytes(text.into_bytes().into_boxed_slice());
         if let Err(error) = wl_copy::Options::new().copy(source, wl_copy::MimeType::Text) {
-            eprintln!("c-term: failed to copy selection: {error}");
+            eprintln!("termite: failed to copy selection: {error}");
         }
     }
 
@@ -675,13 +675,13 @@ impl WindowBackend {
                 | wl_paste::Error::NoMimeType,
             ) => return,
             Err(error) => {
-                eprintln!("c-term: failed to read clipboard: {error}");
+                eprintln!("termite: failed to read clipboard: {error}");
                 return;
             }
         };
         let mut text = String::new();
         if let Err(error) = pipe.read_to_string(&mut text) {
-            eprintln!("c-term: failed to read clipboard text: {error}");
+            eprintln!("termite: failed to read clipboard text: {error}");
             return;
         }
         self.write_paste(&text);
@@ -706,7 +706,7 @@ impl WindowBackend {
         if let Some(child) = &mut self.child
             && let Err(error) = child.master.write_all(&bytes)
         {
-            eprintln!("c-term: failed to paste clipboard text to PTY: {error}");
+            eprintln!("termite: failed to paste clipboard text to PTY: {error}");
         }
     }
 
@@ -769,7 +769,7 @@ impl WindowBackend {
             &overlays,
             screen_opacity,
         ) {
-            eprintln!("c-term: GPU render failed: {error}");
+            eprintln!("termite: GPU render failed: {error}");
         }
         let gpu_elapsed = gpu_started.elapsed();
         let render_finished = Instant::now();
@@ -994,7 +994,7 @@ fn duration_ms(duration: Duration) -> f64 {
 impl ApplicationHandler<UserEvent> for WindowBackend {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.initialize(event_loop) {
-            eprintln!("c-term: failed to initialize window backend: {error}");
+            eprintln!("termite: failed to initialize window backend: {error}");
             event_loop.exit();
         }
     }
@@ -1172,7 +1172,7 @@ mod tests {
     };
     use super::*;
     use crate::window_backend::render_cache::frame_len;
-    use c_term_core::TerminalCore;
+    use termite_core::TerminalCore;
 
     const BENCH_COLS: u16 = 120;
     const BENCH_ROWS: u16 = 36;

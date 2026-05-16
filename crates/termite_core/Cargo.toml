@@ -1,5 +1,5 @@
 [package]
-name = "c_term_core"
+name = "termite_core"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

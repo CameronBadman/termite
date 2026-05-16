@@ -1,4 +1,4 @@
-use c_term_core::{Cell, Color, Grid, TerminalCore};
+use termite_core::{Cell, Color, Grid, TerminalCore};
 
 fn feed(terminal: &mut TerminalCore, input: impl AsRef<[u8]>) {
     let _ = terminal.process_pty_input(input.as_ref());
