@@ -670,7 +670,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         return output_color(vec4<f32>(srgb_to_linear(globals.background.rgb), screen_alpha));
     }
 
-    var color = textureLoad(frame_texture, texel, 0);
+    let sample = textureLoad(frame_texture, texel, 0);
+    let background = srgb_to_linear(globals.background.rgb);
+    var color = vec4<f32>(mix(background, sample.rgb, sample.a), 1.0);
     let pixel = vec2<f32>(texel);
     let count = min(u32(globals.overlay.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {

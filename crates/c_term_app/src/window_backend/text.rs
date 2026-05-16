@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs};
 
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
-use c_term_core::{Cell, Style};
+use c_term_core::{Cell, Color, Style};
 use font8x8::{
     BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS, MISC_FONTS,
     SGA_FONTS, UnicodeFonts,
@@ -78,6 +78,7 @@ pub(super) struct TextRenderer {
 pub(super) struct CellPaint {
     pub(super) fg: [u8; 3],
     pub(super) bg: [u8; 3],
+    pub(super) background_opaque: bool,
     pub(super) metrics: TerminalMetrics,
 }
 
@@ -162,6 +163,10 @@ impl TextRenderer {
                     == background
             {
                 end += 1;
+            }
+            if matches!(background, Color::DefaultBackground) {
+                x = end;
+                continue;
             }
             let bg = self.theme.color(background);
             if x == 0 && end == cols {
@@ -360,6 +365,7 @@ impl TextRenderer {
         let paint = CellPaint {
             fg,
             bg,
+            background_opaque: !matches!(style.background, Color::DefaultBackground),
             metrics: self.metrics,
         };
         if columns == 1 && draw_special_cell(frame, width, cell_x, cell_y, ch, paint) {
@@ -894,12 +900,41 @@ fn draw_glyph_bitmap(
 }
 
 fn blend_pixel(pixel: &mut [u8], color: [u8; 3], alpha: u8) {
-    let alpha = u16::from(alpha);
-    let inv = 255 - alpha;
-    for (channel, color) in pixel[..3].iter_mut().zip(color) {
-        *channel = ((u16::from(*channel) * inv + u16::from(color) * alpha) / 255) as u8;
+    if alpha == 0 {
+        return;
     }
-    pixel[3] = 0xff;
+    if pixel[3] == 0 {
+        pixel[..3].copy_from_slice(&color);
+        pixel[3] = alpha;
+        return;
+    }
+    if alpha == u8::MAX {
+        pixel[..3].copy_from_slice(&color);
+        pixel[3] = u8::MAX;
+        return;
+    }
+
+    let src_alpha = u16::from(alpha);
+    let dst_alpha = u16::from(pixel[3]);
+    if dst_alpha == 255 {
+        let inv = 255 - src_alpha;
+        for (channel, color) in pixel[..3].iter_mut().zip(color) {
+            *channel = ((u16::from(*channel) * inv + u16::from(color) * src_alpha) / 255) as u8;
+        }
+        return;
+    }
+
+    let inv = 255 - src_alpha;
+    let out_alpha = src_alpha + (dst_alpha * inv + 127) / 255;
+    if out_alpha == 0 {
+        return;
+    }
+    for (channel, color) in pixel[..3].iter_mut().zip(color) {
+        let src = u16::from(color) * src_alpha;
+        let dst = (u16::from(*channel) * dst_alpha * inv + 127) / 255;
+        *channel = ((src + dst + out_alpha / 2) / out_alpha) as u8;
+    }
+    pixel[3] = out_alpha as u8;
 }
 
 fn draw_bitmap_cell(
@@ -924,6 +959,9 @@ fn draw_bitmap_cell(
             let glyph_x = sample_bitmap_axis(px, metrics.cell_width as usize);
             let bit = ((glyph_row >> glyph_x) & 1) != 0
                 || (bold && glyph_x > 0 && ((glyph_row >> (glyph_x - 1)) & 1) != 0);
+            if !bit && !paint.background_opaque {
+                continue;
+            }
             let color = if bit { paint.fg } else { paint.bg };
             let index = ((origin_y + py) * width + origin_x + px) * 4;
             frame[index..index + 4].copy_from_slice(&[color[0], color[1], color[2], 0xff]);

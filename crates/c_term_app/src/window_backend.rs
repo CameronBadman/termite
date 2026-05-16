@@ -1173,6 +1173,7 @@ mod tests {
             CellPaint {
                 fg: [220, 224, 232],
                 bg: [16, 18, 24],
+                background_opaque: true,
                 metrics,
             },
         ));
@@ -1207,6 +1208,7 @@ mod tests {
             CellPaint {
                 fg: [220, 224, 232],
                 bg: [16, 18, 24],
+                background_opaque: true,
                 metrics,
             },
         ));
@@ -1232,6 +1234,7 @@ mod tests {
             CellPaint {
                 fg: [220, 224, 232],
                 bg: [16, 18, 24],
+                background_opaque: true,
                 metrics,
             },
         ));
