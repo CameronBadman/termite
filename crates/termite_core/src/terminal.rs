@@ -163,7 +163,9 @@ where
             return self.tick();
         }
         while self.parser.can_process_ascii_fast_path() && !input.is_empty() {
-            if let Some(sgr_len) = self.process_fast_sgr(input) {
+            if input.starts_with(b"\x1b[")
+                && let Some(sgr_len) = self.process_fast_sgr(input)
+            {
                 input = &input[sgr_len..];
                 continue;
             }
@@ -194,7 +196,9 @@ where
             return self.profiled_tick();
         }
         while self.parser.can_process_ascii_fast_path() && !input.is_empty() {
-            if let Some(sgr_len) = self.profiled_fast_sgr(input) {
+            if input.starts_with(b"\x1b[")
+                && let Some(sgr_len) = self.profiled_fast_sgr(input)
+            {
                 input = &input[sgr_len..];
                 continue;
             }
