@@ -2,7 +2,7 @@ use std::{env, error::Error};
 
 use crate::{plugins::PluginHost, theme::Theme, window_backend};
 
-type InstallPart = Box<dyn FnOnce(&mut Runner)>;
+type ConfigStep = Box<dyn FnOnce(&mut Runner)>;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) enum FontConfig {
@@ -102,6 +102,16 @@ pub(crate) struct Runner {
     text_render: TextRenderConfig,
 }
 
+pub(crate) struct RuntimeConfig {
+    pub(crate) shell: String,
+    pub(crate) plugins: PluginHost,
+    pub(crate) font: FontConfig,
+    pub(crate) metrics: TerminalMetrics,
+    pub(crate) theme: Theme,
+    pub(crate) zoom: ZoomConfig,
+    pub(crate) text_render: TextRenderConfig,
+}
+
 impl Runner {
     pub(crate) fn new() -> Self {
         Self {
@@ -115,8 +125,8 @@ impl Runner {
         }
     }
 
-    pub(crate) fn with(mut self, part: impl RunnerPart) -> Self {
-        part.install(&mut self);
+    pub(crate) fn with(mut self, setting: impl RunnerSetting) -> Self {
+        setting.apply_to(&mut self);
         self
     }
 
@@ -124,26 +134,16 @@ impl Runner {
         window_backend::run(self)
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        String,
-        PluginHost,
-        FontConfig,
-        TerminalMetrics,
-        Theme,
-        ZoomConfig,
-        TextRenderConfig,
-    ) {
-        (
-            self.shell,
-            self.plugins,
-            self.font,
-            self.metrics,
-            self.theme,
-            self.zoom,
-            self.text_render,
-        )
+    pub(crate) fn into_runtime_config(self) -> RuntimeConfig {
+        RuntimeConfig {
+            shell: self.shell,
+            plugins: self.plugins,
+            font: self.font,
+            metrics: self.metrics,
+            theme: self.theme,
+            zoom: self.zoom,
+            text_render: self.text_render,
+        }
     }
 
     fn add_plugin(&mut self, plugin: impl crate::plugins::Plugin + 'static) {
@@ -201,130 +201,128 @@ impl Runner {
     }
 }
 
-pub(crate) trait RunnerPart {
-    fn install(self, runner: &mut Runner);
+pub(crate) trait RunnerSetting {
+    fn apply_to(self, runner: &mut Runner);
 }
 
-impl<P> RunnerPart for P
+impl<P> RunnerSetting for P
 where
     P: crate::plugins::Plugin + 'static,
 {
-    fn install(self, runner: &mut Runner) {
+    fn apply_to(self, runner: &mut Runner) {
         runner.add_plugin(self);
     }
 }
 
-pub(crate) fn bitmap_font() -> FontPart {
-    FontPart(FontConfig::Bitmap8x8)
+pub(crate) fn bitmap_font() -> FontSetting {
+    FontSetting(FontConfig::Bitmap8x8)
 }
 
 #[allow(dead_code)]
-pub(crate) fn font_file(path: impl Into<String>) -> FontPart {
+pub(crate) fn font_file(path: impl Into<String>) -> FontSetting {
     font_file_with_size(path, 14.0)
 }
 
 #[allow(dead_code)]
-pub(crate) fn font_file_with_size(path: impl Into<String>, size: f32) -> FontPart {
+pub(crate) fn font_file_with_size(path: impl Into<String>, size: f32) -> FontSetting {
     font_files_with_size([path], size)
 }
 
 #[allow(dead_code)]
-pub(crate) fn font_files(paths: impl IntoIterator<Item = impl Into<String>>) -> FontPart {
+pub(crate) fn font_files(paths: impl IntoIterator<Item = impl Into<String>>) -> FontSetting {
     font_files_with_size(paths, 14.0)
 }
 
 pub(crate) fn font_files_with_size(
     paths: impl IntoIterator<Item = impl Into<String>>,
     size: f32,
-) -> FontPart {
-    FontPart(FontConfig::GlyphAtlas {
+) -> FontSetting {
+    FontSetting(FontConfig::GlyphAtlas {
         paths: paths.into_iter().map(Into::into).collect(),
         size,
     })
 }
 
-pub(crate) struct FontPart(FontConfig);
+pub(crate) struct FontSetting(FontConfig);
 
-impl RunnerPart for FontPart {
-    fn install(self, runner: &mut Runner) {
+impl RunnerSetting for FontSetting {
+    fn apply_to(self, runner: &mut Runner) {
         runner.set_font(self.0);
     }
 }
 
-pub(crate) fn terminal_metrics(metrics: TerminalMetrics) -> MetricsPart {
-    MetricsPart(metrics)
+pub(crate) fn terminal_metrics(metrics: TerminalMetrics) -> MetricsSetting {
+    MetricsSetting(metrics)
 }
 
-pub(crate) struct MetricsPart(TerminalMetrics);
+pub(crate) struct MetricsSetting(TerminalMetrics);
 
-impl RunnerPart for MetricsPart {
-    fn install(self, runner: &mut Runner) {
+impl RunnerSetting for MetricsSetting {
+    fn apply_to(self, runner: &mut Runner) {
         runner.set_metrics(self.0);
     }
 }
 
-pub(crate) fn theme(theme: Theme) -> ThemePart {
-    ThemePart(theme)
+pub(crate) fn theme(theme: Theme) -> ThemeSetting {
+    ThemeSetting(theme)
 }
 
-pub(crate) struct ThemePart(Theme);
+pub(crate) struct ThemeSetting(Theme);
 
-impl RunnerPart for ThemePart {
-    fn install(self, runner: &mut Runner) {
+impl RunnerSetting for ThemeSetting {
+    fn apply_to(self, runner: &mut Runner) {
         runner.set_theme(self.0);
     }
 }
 
-pub(crate) fn terminal_zoom(zoom: ZoomConfig) -> ZoomPart {
-    ZoomPart(zoom)
+pub(crate) fn terminal_zoom(zoom: ZoomConfig) -> ZoomSetting {
+    ZoomSetting(zoom)
 }
 
-pub(crate) struct ZoomPart(ZoomConfig);
+pub(crate) struct ZoomSetting(ZoomConfig);
 
-impl RunnerPart for ZoomPart {
-    fn install(self, runner: &mut Runner) {
+impl RunnerSetting for ZoomSetting {
+    fn apply_to(self, runner: &mut Runner) {
         runner.set_zoom(self.0);
     }
 }
 
-pub(crate) fn text_render(render: TextRenderConfig) -> TextRenderPart {
-    TextRenderPart(render)
+pub(crate) fn text_render(render: TextRenderConfig) -> TextRenderSetting {
+    TextRenderSetting(render)
 }
 
-pub(crate) struct TextRenderPart(TextRenderConfig);
+pub(crate) struct TextRenderSetting(TextRenderConfig);
 
-impl RunnerPart for TextRenderPart {
-    fn install(self, runner: &mut Runner) {
+impl RunnerSetting for TextRenderSetting {
+    fn apply_to(self, runner: &mut Runner) {
         runner.set_text_render(self.0);
     }
 }
 
-pub(crate) fn parts() -> Parts {
-    Parts::new()
+pub(crate) fn config_group() -> ConfigGroup {
+    ConfigGroup::new()
 }
 
-pub(crate) struct Parts {
-    install: Vec<InstallPart>,
+pub(crate) struct ConfigGroup {
+    steps: Vec<ConfigStep>,
 }
 
-impl Parts {
+impl ConfigGroup {
     fn new() -> Self {
-        Self {
-            install: Vec::new(),
-        }
+        Self { steps: Vec::new() }
     }
 
-    pub(crate) fn with(mut self, part: impl RunnerPart + 'static) -> Self {
-        self.install
-            .push(Box::new(move |runner| part.install(runner)));
+    pub(crate) fn with(mut self, setting: impl RunnerSetting + 'static) -> Self {
+        self.steps
+            .push(Box::new(move |runner| setting.apply_to(runner)));
         self
     }
 }
 
-impl RunnerPart for Parts {
-    fn install(self, runner: &mut Runner) {
-        for install in self.install {
-            install(runner);
+impl RunnerSetting for ConfigGroup {
+    fn apply_to(self, runner: &mut Runner) {
+        for step in self.steps {
+            step(runner);
         }
     }
 }

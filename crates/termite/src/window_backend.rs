@@ -27,7 +27,7 @@ use wl_clipboard_rs::{copy as wl_copy, paste as wl_paste};
 use crate::{PtyChild, set_pty_winsize, spawn_shell};
 use crate::{
     plugins::{PluginFrame, PluginHost},
-    runner::{FontConfig, Runner, TerminalMetrics, TextRenderConfig, ZoomConfig},
+    runner::{FontConfig, Runner, RuntimeConfig, TerminalMetrics, TextRenderConfig},
     theme::Theme,
 };
 
@@ -61,17 +61,7 @@ pub(crate) fn run(runner: Runner) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let (shell, plugins, font, metrics, theme, zoom, text_render) = runner.into_parts();
-    let mut state = WindowBackend::new(
-        shell,
-        event_loop.create_proxy(),
-        plugins,
-        font,
-        metrics,
-        theme,
-        zoom,
-        text_render,
-    );
+    let mut state = WindowBackend::new(event_loop.create_proxy(), runner.into_runtime_config());
     event_loop.run_app(&mut state)?;
     Ok(())
 }
@@ -112,47 +102,37 @@ struct WindowBackend {
 }
 
 impl WindowBackend {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        shell: String,
-        proxy: EventLoopProxy<UserEvent>,
-        plugins: PluginHost,
-        font: FontConfig,
-        metrics: TerminalMetrics,
-        theme: Theme,
-        zoom: ZoomConfig,
-        text_render: TextRenderConfig,
-    ) -> Self {
-        let base_metrics = metrics;
-        let default_zoom_steps = normalize_zoom_steps(zoom.default_steps);
-        let zoom_steps = if zoom.persist {
+    fn new(proxy: EventLoopProxy<UserEvent>, config: RuntimeConfig) -> Self {
+        let base_metrics = config.metrics;
+        let default_zoom_steps = normalize_zoom_steps(config.zoom.default_steps);
+        let zoom_steps = if config.zoom.persist {
             load_zoom_steps().unwrap_or(default_zoom_steps)
         } else {
             default_zoom_steps
         };
         let metrics = scaled_metrics(base_metrics, zoom_steps);
-        let scaled_font = scaled_font(&font, zoom_steps);
+        let scaled_font = scaled_font(&config.font, zoom_steps);
         Self {
-            shell,
+            shell: config.shell,
             proxy,
             window: None,
             renderer: None,
             terminal: None,
-            plugins,
+            plugins: config.plugins,
             child: None,
             modifiers: ModifiersState::empty(),
             cols: 1,
             rows: 1,
             font: scaled_font.clone(),
-            base_font: font.clone(),
+            base_font: config.font.clone(),
             metrics,
             base_metrics,
             zoom_steps,
             default_zoom_steps,
-            persist_zoom: zoom.persist,
-            text_render,
-            theme,
-            render_cache: RenderCache::new(scaled_font, theme, metrics, text_render),
+            persist_zoom: config.zoom.persist,
+            text_render: config.text_render,
+            theme: config.theme,
+            render_cache: RenderCache::new(scaled_font, config.theme, metrics, config.text_render),
             selection: None,
             mouse_buttons: 0,
             mouse_position: None,
@@ -192,6 +172,12 @@ impl WindowBackend {
         let (cols, rows) = grid_size(size, self.metrics);
         let grid_ms = duration_ms(started.elapsed());
         let started = Instant::now();
+        let mut child = spawn_shell(&self.shell, cols, rows)?;
+        let pty_spawn_ms = duration_ms(started.elapsed());
+        let started = Instant::now();
+        spawn_pty_reader(&mut child, self.proxy.clone())?;
+        let pty_reader_ms = duration_ms(started.elapsed());
+        let started = Instant::now();
         let renderer = GpuRenderer::new(
             window.clone(),
             GpuRendererConfig {
@@ -205,12 +191,6 @@ impl WindowBackend {
             },
         )?;
         let renderer_ms = duration_ms(started.elapsed());
-        let started = Instant::now();
-        let mut child = spawn_shell(&self.shell, cols, rows)?;
-        let pty_spawn_ms = duration_ms(started.elapsed());
-        let started = Instant::now();
-        spawn_pty_reader(&mut child, self.proxy.clone())?;
-        let pty_reader_ms = duration_ms(started.elapsed());
 
         let started = Instant::now();
         self.cols = cols;
@@ -1498,7 +1478,7 @@ mod tests {
     #[test]
     #[ignore]
     fn render_cache_bench() {
-        let (_, _, font, metrics, theme, _, text_render) = crate::config::runner().into_parts();
+        let config = crate::config::runner().into_runtime_config();
         let workloads = [
             ("plain-scroll", bench_payload_plain_scroll()),
             ("color-table", bench_payload_color_table()),
@@ -1510,7 +1490,13 @@ mod tests {
             "workload", "bytes", "core+draw", "draw-only", "updates"
         );
         for (name, payload) in workloads {
-            let result = run_render_bench(&payload, font.clone(), metrics, theme, text_render);
+            let result = run_render_bench(
+                &payload,
+                config.font.clone(),
+                config.metrics,
+                config.theme,
+                config.text_render,
+            );
             println!(
                 "{:<14} {:>9} {:>9.2}ms {:>9.2}ms {:>10}",
                 name,

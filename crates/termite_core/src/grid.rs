@@ -200,7 +200,7 @@ impl Grid {
             return None;
         }
 
-        self.print_linewrap();
+        self.apply_pending_wrap();
 
         let mut width = char_width(ch);
         if width == 0 {
@@ -222,8 +222,8 @@ impl Grid {
                 if changed {
                     self.mark_line_damage(y, x, self.width - x);
                 }
-                self.mark_row_has_wide_state(y);
-                self.print_linewrap();
+                self.mark_row_contains_wide_cell(y);
+                self.apply_pending_wrap();
             } else {
                 width = 1;
             }
@@ -234,9 +234,10 @@ impl Grid {
         let physical_row = self.physical_row(y);
         let row_start = physical_row * usize::from(self.width);
         let (mut damage_start, mut damage_end, mut changed) =
-            self.clear_cell_for_write_in_row(row_start, x, y);
+            self.clear_wide_boundary_for_write_in_row(row_start, x, y);
         if width > 1 && x + 1 < self.width {
-            let (start, end, range_changed) = self.clear_cell_for_write_in_row(row_start, x + 1, y);
+            let (start, end, range_changed) =
+                self.clear_wide_boundary_for_write_in_row(row_start, x + 1, y);
             damage_start = damage_start.min(start);
             damage_end = damage_end.max(end);
             changed |= range_changed;
@@ -275,7 +276,7 @@ impl Grid {
         {
             *wide = true;
         }
-        self.update_physical_row_length_after_write(physical_row, x, width, cell);
+        self.update_row_length_after_cell_write(physical_row, x, width, cell);
 
         if changed {
             self.mark_line_damage(y, damage_start, damage_end - damage_start + 1);
@@ -287,7 +288,7 @@ impl Grid {
     pub fn put_ascii_run(&mut self, bytes: &[u8], style: Style) {
         let mut offset = 0;
         while offset < bytes.len() {
-            self.print_linewrap();
+            self.apply_pending_wrap();
 
             let x = self.cursor.x;
             let y = self.cursor.y;
@@ -296,7 +297,7 @@ impl Grid {
             let physical_row = self.physical_row(y);
             let row_start = physical_row * usize::from(self.width);
             let may_have_wide = self.wide_rows.get(physical_row).copied().unwrap_or(true);
-            if may_have_wide && self.row_range_has_wide_state(y, x, count as u16) {
+            if may_have_wide && self.write_range_touches_wide_cell(y, x, count as u16) {
                 let _ = self.put_char(char::from(bytes[offset]), style);
                 offset += 1;
                 continue;
@@ -312,7 +313,7 @@ impl Grid {
                     spacer: false,
                 };
             }
-            self.update_physical_row_length_after_ascii_write(
+            self.update_row_length_after_ascii_write(
                 physical_row,
                 x,
                 &bytes[offset..offset + count],
@@ -338,7 +339,7 @@ impl Grid {
         }
         let physical_row = self.physical_row(y);
         let may_have_wide = self.wide_rows.get(physical_row).copied().unwrap_or(true);
-        if may_have_wide && self.row_range_has_wide_state(y, x, count as u16) {
+        if may_have_wide && self.write_range_touches_wide_cell(y, x, count as u16) {
             return false;
         }
 
@@ -351,7 +352,7 @@ impl Grid {
                 spacer: false,
             };
         }
-        self.update_physical_row_length_after_ascii_write(physical_row, x, bytes, style);
+        self.update_row_length_after_ascii_write(physical_row, x, bytes, style);
         self.mark_line_damage(y, x, count as u16);
 
         let old = self.cursor;
@@ -369,6 +370,58 @@ impl Grid {
             });
         }
         true
+    }
+
+    pub(crate) fn put_width1_text_run(&mut self, text: &str, style: Style) {
+        let mut offset = 0;
+        while offset < text.len() {
+            self.apply_pending_wrap();
+
+            let x = self.cursor.x;
+            let y = self.cursor.y;
+            let physical_row = self.physical_row(y);
+            let available = usize::from(self.width.saturating_sub(x)).max(1);
+            let mut count = 0usize;
+            let mut end = offset;
+            for ch in text[offset..].chars().take(available) {
+                count += 1;
+                end += ch.len_utf8();
+            }
+            if count == 0 {
+                break;
+            }
+
+            let may_have_wide = self.wide_rows.get(physical_row).copied().unwrap_or(true);
+            if may_have_wide && self.write_range_touches_wide_cell(y, x, count as u16) {
+                let ch = text[offset..].chars().next().expect("non-empty text run");
+                let _ = self.put_char(ch, style);
+                offset += ch.len_utf8();
+                continue;
+            }
+
+            let row_start = physical_row * usize::from(self.width);
+            let start = row_start + usize::from(x);
+            let mut used_end = None;
+            for (index, (cell, ch)) in self.cells[start..start + count]
+                .iter_mut()
+                .zip(text[offset..end].chars())
+                .enumerate()
+            {
+                *cell = Cell {
+                    ch,
+                    style,
+                    wide: false,
+                    spacer: false,
+                };
+                if style != Style::default() || ch != ' ' {
+                    used_end = Some(x.saturating_add(index as u16).saturating_add(1));
+                }
+            }
+            self.update_row_length_after_text_write(physical_row, x, count as u16, used_end);
+            self.mark_line_damage(y, x, count as u16);
+            self.advance_cursor(count as u16);
+            offset = end;
+        }
     }
 
     pub fn put_tab(&mut self, style: Style) {
@@ -787,7 +840,8 @@ impl Grid {
                 .cell(self.cursor.x, self.cursor.y)
                 .is_some_and(|cell| cell.spacer)
         {
-            let (_, _, boundary_changed) = self.clear_cell_for_write(self.cursor.x, self.cursor.y);
+            let (_, _, boundary_changed) =
+                self.clear_wide_boundary_for_write(self.cursor.x, self.cursor.y);
             changed |= boundary_changed;
         }
 
@@ -951,7 +1005,7 @@ impl Grid {
         self.scroll_down(1);
     }
 
-    fn print_linewrap(&mut self) {
+    fn apply_pending_wrap(&mut self) {
         if !self.pending_wrap {
             return;
         }
@@ -1021,16 +1075,17 @@ impl Grid {
         true
     }
 
-    fn clear_cell_for_write(&mut self, x: u16, y: u16) -> (u16, u16, bool) {
+    fn clear_wide_boundary_for_write(&mut self, x: u16, y: u16) -> (u16, u16, bool) {
         if x >= self.width || y >= self.height {
             return (x, x, false);
         }
 
         let row_start = self.row_start(y);
-        self.clear_cell_for_write_in_row(row_start, x, y)
+        self.clear_wide_boundary_for_write_in_row(row_start, x, y)
     }
 
-    fn clear_cell_for_write_in_row(
+    // Returns the damage span touched while removing a stale wide-cell lead/spacer pair.
+    fn clear_wide_boundary_for_write_in_row(
         &mut self,
         row_start: usize,
         x: u16,
@@ -1071,7 +1126,7 @@ impl Grid {
         (start, end, changed)
     }
 
-    fn row_range_has_wide_state(&self, y: u16, x: u16, width: u16) -> bool {
+    fn write_range_touches_wide_cell(&self, y: u16, x: u16, width: u16) -> bool {
         if y >= self.height || width == 0 {
             return false;
         }
@@ -1089,18 +1144,18 @@ impl Grid {
             || (end < usize::from(self.width) && self.cells[row_start + end].spacer)
     }
 
-    fn mark_row_has_wide_state(&mut self, y: u16) {
+    fn mark_row_contains_wide_cell(&mut self, y: u16) {
         let row = self.physical_row(y);
         if let Some(wide) = self.wide_rows.get_mut(row) {
             *wide = true;
         }
     }
 
-    fn refresh_wide_row(&mut self, y: u16) {
+    fn refresh_wide_row_flag(&mut self, y: u16) {
         let row = self.physical_row(y);
         let row_start = row * usize::from(self.width);
         let has_wide =
-            row_contains_wide_state(&self.cells[row_start..row_start + usize::from(self.width)]);
+            row_has_wide_cell(&self.cells[row_start..row_start + usize::from(self.width)]);
         if let Some(wide) = self.wide_rows.get_mut(row) {
             *wide = has_wide;
         }
@@ -1109,7 +1164,7 @@ impl Grid {
     fn rebuild_wide_rows(&mut self) {
         self.wide_rows = vec![false; usize::from(self.height)];
         for y in 0..self.height {
-            self.refresh_wide_row(y);
+            self.refresh_wide_row_flag(y);
         }
     }
 
@@ -1120,13 +1175,7 @@ impl Grid {
             .unwrap_or(self.width)
     }
 
-    fn update_physical_row_length_after_write(
-        &mut self,
-        row: usize,
-        x: u16,
-        width: u16,
-        cell: Cell,
-    ) {
+    fn update_row_length_after_cell_write(&mut self, row: usize, x: u16, width: u16, cell: Cell) {
         let end = x.saturating_add(width).min(self.width);
         let current = self.row_lengths.get(row).copied().unwrap_or(0);
         if cell != Cell::default() || width > 1 {
@@ -1134,11 +1183,11 @@ impl Grid {
                 *length = (*length).max(end);
             }
         } else if x < current && end >= current {
-            self.refresh_physical_row_length(row);
+            self.refresh_cached_row_length(row);
         }
     }
 
-    fn update_physical_row_length_after_ascii_write(
+    fn update_row_length_after_ascii_write(
         &mut self,
         row: usize,
         x: u16,
@@ -1154,16 +1203,35 @@ impl Grid {
         }
         let written_end = x.saturating_add(bytes.len() as u16).min(self.width);
         if x < current && written_end >= current && used_end.is_none_or(|end| end < current) {
-            self.refresh_physical_row_length(row);
+            self.refresh_cached_row_length(row);
+        }
+    }
+
+    fn update_row_length_after_text_write(
+        &mut self,
+        row: usize,
+        x: u16,
+        width: u16,
+        used_end: Option<u16>,
+    ) {
+        let current = self.row_lengths.get(row).copied().unwrap_or(0);
+        if let Some(end) = used_end
+            && let Some(length) = self.row_lengths.get_mut(row)
+        {
+            *length = (*length).max(end.min(self.width));
+        }
+        let written_end = x.saturating_add(width).min(self.width);
+        if x < current && written_end >= current && used_end.is_none_or(|end| end < current) {
+            self.refresh_cached_row_length(row);
         }
     }
 
     fn refresh_row_length(&mut self, y: u16) {
         let row = self.physical_row(y);
-        self.refresh_physical_row_length(row);
+        self.refresh_cached_row_length(row);
     }
 
-    fn refresh_physical_row_length(&mut self, row: usize) {
+    fn refresh_cached_row_length(&mut self, row: usize) {
         let width = usize::from(self.width);
         let row_start = row * width;
         let end = logical_row_end(&self.cells[row_start..row_start + width]) as u16;
@@ -1180,14 +1248,14 @@ impl Grid {
         let start_row = range.start / width;
         let end_row = (range.end.saturating_sub(1) / width).min(usize::from(self.height) - 1);
         for row in start_row..=end_row {
-            self.refresh_physical_row_length(row);
+            self.refresh_cached_row_length(row);
         }
     }
 
     fn rebuild_row_lengths(&mut self) {
         self.row_lengths = vec![0; usize::from(self.height)];
         for row in 0..usize::from(self.height) {
-            self.refresh_physical_row_length(row);
+            self.refresh_cached_row_length(row);
         }
     }
 
@@ -1304,7 +1372,7 @@ fn ascii_run_used_end(x: u16, bytes: &[u8], style: Style) -> Option<u16> {
     Some(x.saturating_add(index as u16).saturating_add(1))
 }
 
-fn row_contains_wide_state(row: &[Cell]) -> bool {
+fn row_has_wide_cell(row: &[Cell]) -> bool {
     row.iter().any(|cell| cell.wide || cell.spacer)
 }
 

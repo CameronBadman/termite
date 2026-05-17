@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::grid::is_fast_width1_char;
 use crate::{
     Cursor, DamageBatch, Grid, MouseTracking, ParserAction, ParserAdapter, SimpleParser, Style,
     StyleUpdate, TerminalMode,
@@ -369,6 +370,16 @@ where
                 }
                 let run = &input[start..index];
                 self.last_printed = char::from(input[index - 1]);
+                if fast_width1_char_at(input, index).is_some()
+                    && let Some(run) = scan_fast_width1_run(input, start)
+                {
+                    let text = std::str::from_utf8(&input[start..run.end])
+                        .expect("fast width-one text run is valid UTF-8");
+                    self.grid.put_width1_text_run(text, self.style);
+                    self.last_printed = run.last;
+                    index = run.end;
+                    continue;
+                }
                 if input.get(index..index + 2) == Some(b"\r\n")
                     && self.grid.put_ascii_run_crlf(run, self.style)
                 {
@@ -381,6 +392,16 @@ where
             if let Some(ch) = decode_utf8_char(input, index)
                 && !ch.is_control()
             {
+                if is_fast_width1_non_ascii(ch)
+                    && let Some(run) = scan_fast_width1_run(input, index)
+                {
+                    let text = std::str::from_utf8(&input[index..run.end])
+                        .expect("fast width-one text run is valid UTF-8");
+                    self.grid.put_width1_text_run(text, self.style);
+                    self.last_printed = run.last;
+                    index = run.end;
+                    continue;
+                }
                 let _ = self.grid.put_char(ch, self.style);
                 self.last_printed = ch;
                 index += ch.len_utf8();
@@ -506,12 +527,30 @@ where
                 {
                     index += 1;
                 }
-                self.grid.put_ascii_run(&bytes[start..index], self.style);
                 self.last_printed = char::from(bytes[index - 1]);
+                if fast_width1_char_at(bytes, index).is_some()
+                    && let Some(run) = scan_fast_width1_run(bytes, start)
+                {
+                    self.grid
+                        .put_width1_text_run(&text[start..run.end], self.style);
+                    self.last_printed = run.last;
+                    index = run.end;
+                    continue;
+                }
+                self.grid.put_ascii_run(&bytes[start..index], self.style);
                 continue;
             }
 
             let ch = text[index..].chars().next().expect("valid char boundary");
+            if is_fast_width1_non_ascii(ch)
+                && let Some(run) = scan_fast_width1_run(bytes, index)
+            {
+                self.grid
+                    .put_width1_text_run(&text[index..run.end], self.style);
+                self.last_printed = run.last;
+                index = run.end;
+                continue;
+            }
             let _ = self.grid.put_char(ch, self.style);
             self.last_printed = ch;
             index += ch.len_utf8();
@@ -650,6 +689,51 @@ fn decode_utf8_char(input: &[u8], index: usize) -> Option<char> {
     };
     let bytes = input.get(index..index + len)?;
     std::str::from_utf8(bytes).ok()?.chars().next()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FastWidth1Run {
+    end: usize,
+    last: char,
+}
+
+fn scan_fast_width1_run(input: &[u8], start: usize) -> Option<FastWidth1Run> {
+    let mut index = start;
+    let mut last = None;
+    let mut saw_non_ascii = false;
+    while index < input.len() {
+        let byte = input[index];
+        if byte.is_ascii_graphic() || byte == b' ' {
+            last = Some(char::from(byte));
+            index += 1;
+            continue;
+        }
+        let Some(ch) = fast_width1_char_at(input, index) else {
+            break;
+        };
+        saw_non_ascii = true;
+        last = Some(ch);
+        index += ch.len_utf8();
+    }
+
+    if saw_non_ascii {
+        Some(FastWidth1Run {
+            end: index,
+            last: last?,
+        })
+    } else {
+        None
+    }
+}
+
+fn fast_width1_char_at(input: &[u8], index: usize) -> Option<char> {
+    let ch = decode_utf8_char(input, index)?;
+    is_fast_width1_non_ascii(ch).then_some(ch)
+}
+
+#[inline]
+fn is_fast_width1_non_ascii(ch: char) -> bool {
+    !ch.is_ascii() && !ch.is_control() && is_fast_width1_char(ch)
 }
 
 fn parse_sgr_code(bytes: &[u8]) -> Option<u16> {

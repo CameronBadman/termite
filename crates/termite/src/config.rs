@@ -2,8 +2,8 @@ use crate::{
     plugins::{CursorLine, CursorLineConfig, CursorTrail, CursorTrailColor, CursorTrailConfig},
     plugins::{ScreenOpacity, ScreenOpacityConfig},
     runner::{
-        Runner, RunnerPart, TerminalMetrics, TextRenderConfig, ZoomConfig, bitmap_font,
-        font_files_with_size, parts, terminal_metrics, terminal_zoom, text_render, theme,
+        Runner, RunnerSetting, TerminalMetrics, TextRenderConfig, ZoomConfig, bitmap_font,
+        config_group, font_files_with_size, terminal_metrics, terminal_zoom, text_render, theme,
     },
     theme::Theme,
 };
@@ -61,7 +61,7 @@ pub(crate) fn runner() -> Runner {
         .with(terminal_plugins())
 }
 
-fn terminal_font() -> impl RunnerPart {
+fn terminal_font() -> impl RunnerSetting {
     if USE_TTF_FONT {
         font_files_with_size(TTF_FONT_PATHS.iter().copied(), FONT_SIZE)
     } else {
@@ -69,7 +69,7 @@ fn terminal_font() -> impl RunnerPart {
     }
 }
 
-fn terminal_theme() -> impl RunnerPart {
+fn terminal_theme() -> impl RunnerSetting {
     theme(Theme {
         foreground: THEME_FOREGROUND,
         background: THEME_BACKGROUND,
@@ -78,7 +78,7 @@ fn terminal_theme() -> impl RunnerPart {
     })
 }
 
-fn terminal_text_render() -> impl RunnerPart {
+fn terminal_text_render() -> impl RunnerSetting {
     text_render(TextRenderConfig {
         text_weight: TEXT_WEIGHT,
         symbol_weight: SYMBOL_WEIGHT,
@@ -91,15 +91,15 @@ fn terminal_default_metrics() -> TerminalMetrics {
     metrics_for_font(FONT_SIZE, CELL_WIDTH_RATIO, CELL_HEIGHT_RATIO)
 }
 
-fn terminal_zoom_config() -> impl RunnerPart {
+fn terminal_zoom_config() -> impl RunnerSetting {
     terminal_zoom(ZoomConfig {
         default_steps: DEFAULT_ZOOM_STEPS,
         persist: PERSIST_ZOOM,
     })
 }
 
-fn terminal_plugins() -> impl RunnerPart {
-    parts()
+fn terminal_plugins() -> impl RunnerSetting {
+    config_group()
         .with(screen_opacity_plugin())
         .with(cursor_line_plugin())
         .with(cursor_trail_plugin())
@@ -150,21 +150,21 @@ fn metrics_for_font(size: f32, width_ratio: f32, height_ratio: f32) -> TerminalM
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::{FontConfig, font_file, font_files_with_size, parts};
+    use crate::runner::{FontConfig, config_group, font_file, font_files_with_size};
 
-    fn nested_plugins() -> impl RunnerPart {
-        parts()
-            .with(parts().with(screen_opacity_plugin()))
-            .with(parts().with(cursor_line_plugin()))
-            .with(parts().with(cursor_trail_plugin()))
+    fn nested_plugins() -> impl RunnerSetting {
+        config_group()
+            .with(config_group().with(screen_opacity_plugin()))
+            .with(config_group().with(cursor_line_plugin()))
+            .with(config_group().with(cursor_trail_plugin()))
     }
 
     #[test]
     fn runner_config_can_compose_plugin_groups() {
         let runner = Runner::new()
-            .with(parts().with(screen_opacity_plugin()))
-            .with(parts().with(cursor_line_plugin()))
-            .with(parts().with(cursor_trail_plugin()));
+            .with(config_group().with(screen_opacity_plugin()))
+            .with(config_group().with(cursor_line_plugin()))
+            .with(config_group().with(cursor_trail_plugin()));
 
         assert_eq!(runner.plugin_count(), 3);
     }
