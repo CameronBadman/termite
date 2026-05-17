@@ -14,9 +14,86 @@ use nix::{
 use termite_core::{PROGRAM, PROGRAM_VERSION, TERM};
 
 fn main() {
-    if let Err(error) = config::runner().run() {
+    if let Err(error) = profiler::run(|| config::runner().run()) {
         eprintln!("termite: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(feature = "profile")]
+mod profiler {
+    use std::{
+        env,
+        fs::{self, File},
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use pprof::ProfilerGuard;
+
+    pub(crate) fn run<R>(work: impl FnOnce() -> R) -> R {
+        let Some(output) = profile_output() else {
+            return work();
+        };
+        let frequency = env::var("TERMITE_PPROF_HZ")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(997);
+
+        let guard = match ProfilerGuard::new(frequency) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                eprintln!("termite-profile: failed to start pprof sampler: {error}");
+                None
+            }
+        };
+
+        let result = work();
+
+        if let Some(guard) = guard {
+            if let Err(error) = write_flamegraph(guard, &output) {
+                eprintln!(
+                    "termite-profile: failed to write {}: {error}",
+                    output.display()
+                );
+            } else {
+                eprintln!("termite-profile flamegraph={}", output.display());
+            }
+        }
+
+        result
+    }
+
+    fn profile_output() -> Option<PathBuf> {
+        let value = env::var_os("TERMITE_PPROF")?;
+        if value.is_empty() || value == "1" {
+            let seconds = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default();
+            Some(PathBuf::from(format!(
+                "target/profiles/termite-pprof-{seconds}.svg"
+            )))
+        } else {
+            Some(PathBuf::from(value))
+        }
+    }
+
+    fn write_flamegraph(guard: ProfilerGuard<'_>, output: &PathBuf) -> Result<(), String> {
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let report = guard.report().build().map_err(|error| error.to_string())?;
+        let file = File::create(output).map_err(|error| error.to_string())?;
+        report.flamegraph(file).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(not(feature = "profile"))]
+mod profiler {
+    pub(crate) fn run<R>(work: impl FnOnce() -> R) -> R {
+        work()
     }
 }
 
