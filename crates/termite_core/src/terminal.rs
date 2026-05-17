@@ -915,6 +915,15 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_trims_rows_overwritten_with_default_spaces() {
+        let mut terminal = TerminalCore::new(5, 2);
+        let _ = terminal.process_pty_input(b"abc\r   \r\nx\r\n");
+
+        assert_eq!(terminal.scrollback_len(), 1);
+        assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "");
+    }
+
+    #[test]
     fn scrollback_append_keeps_only_capacity_tail() {
         let mut terminal = TerminalCore::new(3, 1);
         terminal.scrollback_capacity = 2;

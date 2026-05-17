@@ -121,6 +121,7 @@ pub struct Grid {
     scrolled_rows: Vec<Vec<Cell>>,
     scrolled_row_pool: Vec<Vec<Cell>>,
     wide_rows: Vec<bool>,
+    row_lengths: Vec<u16>,
     generation: Generation,
     damage: DamageTracker,
 }
@@ -149,6 +150,7 @@ impl Grid {
             scrolled_rows: Vec::new(),
             scrolled_row_pool: Vec::new(),
             wide_rows: vec![false; usize::from(height)],
+            row_lengths: vec![0; usize::from(height)],
             generation: 1,
             damage,
         }
@@ -263,6 +265,7 @@ impl Grid {
         if width > 1 {
             self.mark_row_has_wide_state(y);
         }
+        self.update_row_length_after_write(y, x, width);
 
         if changed {
             self.mark_line_damage(y, damage_start, damage_end - damage_start + 1);
@@ -299,6 +302,7 @@ impl Grid {
                     spacer: false,
                 };
             }
+            self.update_row_length_after_ascii_write(y, x, &bytes[offset..offset + count], style);
             self.mark_line_damage(y, x, count as u16);
             self.advance_cursor(count as u16);
             offset += count;
@@ -332,6 +336,7 @@ impl Grid {
                 spacer: false,
             };
         }
+        self.update_row_length_after_ascii_write(y, x, bytes, style);
         self.mark_line_damage(y, x, count as u16);
 
         let old = self.cursor;
@@ -468,6 +473,7 @@ impl Grid {
         };
         self.cells.fill(cell);
         self.wide_rows.fill(false);
+        self.row_lengths.fill(self.width);
         self.generation += 1;
         self.damage.mark(DamageRegion::Viewport);
     }
@@ -479,6 +485,7 @@ impl Grid {
                 changed = self.cells.iter().any(|cell| *cell != Cell::default());
                 self.cells.fill(Cell::default());
                 self.wide_rows.fill(false);
+                self.row_lengths.fill(0);
             }
             EraseMode::FromCursor => {
                 changed |= self.clear_cells(
@@ -587,6 +594,7 @@ impl Grid {
         self.cells = cells;
         self.row_offset = 0;
         self.rebuild_wide_rows();
+        self.rebuild_row_lengths();
         self.cursor.x = self.cursor.x.min(self.width - 1);
         self.cursor.y = self.cursor.y.min(self.height - 1);
         self.pending_wrap = false;
@@ -653,6 +661,7 @@ impl Grid {
         }
         self.row_offset = 0;
         self.rebuild_wide_rows();
+        self.rebuild_row_lengths();
 
         self.cursor.x = cursor_x.min(self.width - 1);
         self.cursor.y = cursor_row
@@ -735,7 +744,10 @@ impl Grid {
         let changed = self.cells[range.clone()]
             .iter()
             .any(|cell| *cell != Cell::default());
-        self.cells[range].fill(Cell::default());
+        self.cells[range.clone()].fill(Cell::default());
+        if changed {
+            self.refresh_row_lengths_for_range(range);
+        }
         changed
     }
 
@@ -775,6 +787,7 @@ impl Grid {
         }
 
         let sanitized = self.sanitize_row(self.cursor.y);
+        self.refresh_row_length(self.cursor.y);
         if changed || sanitized {
             self.mark_line_damage(self.cursor.y, self.cursor.x, self.width - self.cursor.x);
         }
@@ -794,9 +807,10 @@ impl Grid {
             let height = usize::from(self.height);
             for row in 0..count.min(height) {
                 let row_start = self.row_start(row as u16);
+                let row_len = usize::from(self.row_length(row as u16));
                 let buffer = self.scrolled_row_pool.pop();
-                self.scrolled_rows.push(scrollback_row(
-                    &self.cells[row_start..row_start + width],
+                self.scrolled_rows.push(scrollback_row_trimmed(
+                    &self.cells[row_start..row_start + row_len],
                     buffer,
                 ));
             }
@@ -807,6 +821,9 @@ impl Grid {
                 let physical_row = self.physical_row(row as u16);
                 if let Some(wide) = self.wide_rows.get_mut(physical_row) {
                     *wide = false;
+                }
+                if let Some(length) = self.row_lengths.get_mut(physical_row) {
+                    *length = 0;
                 }
             }
             self.generation += 1;
@@ -958,6 +975,10 @@ impl Grid {
         if let Some(wide) = self.wide_rows.get_mut(dst_row) {
             *wide = has_wide;
         }
+        let row_length = self.row_lengths.get(src_row).copied().unwrap_or(0);
+        if let Some(length) = self.row_lengths.get_mut(dst_row) {
+            *length = row_length;
+        }
     }
 
     fn clear_row(&mut self, y: u16) {
@@ -968,6 +989,9 @@ impl Grid {
         let physical_row = self.physical_row(y);
         if let Some(wide) = self.wide_rows.get_mut(physical_row) {
             *wide = false;
+        }
+        if let Some(length) = self.row_lengths.get_mut(physical_row) {
+            *length = 0;
         }
     }
 
@@ -996,6 +1020,9 @@ impl Grid {
         if x + 1 < self.width && self.cell(x + 1, y).is_some_and(|cell| cell.spacer) {
             changed |= self.replace_cell(x + 1, y, Cell::default());
             end = x + 1;
+        }
+        if changed {
+            self.refresh_row_length(y);
         }
 
         (start, end, changed)
@@ -1050,6 +1077,80 @@ impl Grid {
         }
     }
 
+    fn row_length(&self, y: u16) -> u16 {
+        self.row_lengths
+            .get(self.physical_row(y))
+            .copied()
+            .unwrap_or(self.width)
+    }
+
+    fn mark_row_used_through(&mut self, y: u16, end: u16) {
+        let row = self.physical_row(y);
+        if let Some(length) = self.row_lengths.get_mut(row) {
+            *length = (*length).max(end.min(self.width));
+        }
+    }
+
+    fn update_row_length_after_write(&mut self, y: u16, x: u16, width: u16) {
+        let end = x.saturating_add(width).min(self.width);
+        let row = self.physical_row(y);
+        let current = self.row_lengths.get(row).copied().unwrap_or(0);
+        let Some(index) = self.index(x, y) else {
+            return;
+        };
+        if self.cells[index] != Cell::default() || width > 1 {
+            self.mark_row_used_through(y, end);
+        } else if x < current && end >= current {
+            self.refresh_row_length(y);
+        }
+    }
+
+    fn update_row_length_after_ascii_write(&mut self, y: u16, x: u16, bytes: &[u8], style: Style) {
+        let row = self.physical_row(y);
+        let current = self.row_lengths.get(row).copied().unwrap_or(0);
+        let used_end = ascii_run_used_end(x, bytes, style);
+        if let Some(end) = used_end {
+            self.mark_row_used_through(y, end);
+        }
+        let written_end = x.saturating_add(bytes.len() as u16).min(self.width);
+        if x < current && written_end >= current && used_end.is_none_or(|end| end < current) {
+            self.refresh_row_length(y);
+        }
+    }
+
+    fn refresh_row_length(&mut self, y: u16) {
+        let row = self.physical_row(y);
+        self.refresh_physical_row_length(row);
+    }
+
+    fn refresh_physical_row_length(&mut self, row: usize) {
+        let width = usize::from(self.width);
+        let row_start = row * width;
+        let end = logical_row_end(&self.cells[row_start..row_start + width]) as u16;
+        if let Some(length) = self.row_lengths.get_mut(row) {
+            *length = end;
+        }
+    }
+
+    fn refresh_row_lengths_for_range(&mut self, range: Range<usize>) {
+        if range.is_empty() || self.width == 0 {
+            return;
+        }
+        let width = usize::from(self.width);
+        let start_row = range.start / width;
+        let end_row = (range.end.saturating_sub(1) / width).min(usize::from(self.height) - 1);
+        for row in start_row..=end_row {
+            self.refresh_physical_row_length(row);
+        }
+    }
+
+    fn rebuild_row_lengths(&mut self) {
+        self.row_lengths = vec![0; usize::from(self.height)];
+        for row in 0..usize::from(self.height) {
+            self.refresh_physical_row_length(row);
+        }
+    }
+
     fn expand_clear_range(&self, range: Range<usize>) -> Range<usize> {
         if range.is_empty() || self.width == 0 {
             return range;
@@ -1100,6 +1201,9 @@ impl Grid {
                 changed = true;
             }
         }
+        if changed {
+            self.refresh_row_length(y);
+        }
         changed
     }
 }
@@ -1122,10 +1226,23 @@ fn blank_row(width: u16) -> Vec<Cell> {
 }
 
 fn scrollback_row(row: &[Cell], buffer: Option<Vec<Cell>>) -> Vec<Cell> {
+    scrollback_row_trimmed(&row[..logical_row_end(row)], buffer)
+}
+
+fn scrollback_row_trimmed(row: &[Cell], buffer: Option<Vec<Cell>>) -> Vec<Cell> {
     let mut buffer = buffer.unwrap_or_default();
     buffer.clear();
-    buffer.extend_from_slice(&row[..logical_row_end(row)]);
+    buffer.extend_from_slice(row);
     buffer
+}
+
+fn ascii_run_used_end(x: u16, bytes: &[u8], style: Style) -> Option<u16> {
+    let index = if style == Style::default() {
+        bytes.iter().rposition(|byte| *byte != b' ')?
+    } else {
+        bytes.len().checked_sub(1)?
+    };
+    Some(x.saturating_add(index as u16).saturating_add(1))
 }
 
 fn row_contains_wide_state(row: &[Cell]) -> bool {
