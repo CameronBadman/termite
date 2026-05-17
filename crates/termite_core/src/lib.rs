@@ -13,4 +13,4 @@ pub use identity::{
 pub use parser::{
     EraseMode, MouseTracking, ParserAction, ParserAdapter, SimpleParser, StyleUpdate, TerminalMode,
 };
-pub use terminal::{ClipboardStore, CoreTick, MouseState, TerminalCore};
+pub use terminal::{ClipboardStore, CoreProfile, CoreTick, MouseState, TerminalCore};

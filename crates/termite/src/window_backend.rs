@@ -11,7 +11,8 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use termite_core::{
-    ClipboardStore, CursorShape, DamageBatch, Grid, MouseState, MouseTracking, TerminalCore,
+    ClipboardStore, CoreProfile, CursorShape, DamageBatch, Grid, MouseState, MouseTracking,
+    TerminalCore,
 };
 use winit::{
     application::ApplicationHandler,
@@ -215,7 +216,9 @@ impl WindowBackend {
         self.cols = cols;
         self.rows = rows;
         self.render_cache.resize(cols, rows);
-        self.terminal = Some(TerminalCore::new(cols, rows));
+        let mut terminal = TerminalCore::new(cols, rows);
+        terminal.set_profile_enabled(profile);
+        self.terminal = Some(terminal);
         self.renderer = Some(renderer);
         self.child = Some(child);
         self.window = Some(window);
@@ -330,6 +333,7 @@ impl WindowBackend {
             return;
         };
         let tick = terminal.process_pty_input(&bytes);
+        let core_profile = terminal.drain_profile();
         for store in tick.clipboard {
             Self::handle_clipboard_store(store);
         }
@@ -347,7 +351,7 @@ impl WindowBackend {
         let damage_regions = tick.damage.regions.len();
         self.apply_damage(&tick.damage);
         self.perf
-            .record_pty(input_len, damage_regions, started.elapsed());
+            .record_pty(input_len, damage_regions, started.elapsed(), core_profile);
         let now = Instant::now();
         if synchronized {
             self.disarm_delayed_render();
@@ -894,6 +898,15 @@ struct PerfStats {
     pty_events: u64,
     pty_bytes: u64,
     pty_core_time: Duration,
+    core_fast_sgr_time: Duration,
+    core_fast_text_time: Duration,
+    core_parser_time: Duration,
+    core_apply_time: Duration,
+    core_tick_time: Duration,
+    core_fast_sgr_calls: u64,
+    core_fast_text_calls: u64,
+    core_parser_bytes: u64,
+    core_actions: u64,
     damage_regions: u64,
     frames: u64,
     full_uploads: u64,
@@ -922,6 +935,15 @@ impl PerfStats {
             pty_events: 0,
             pty_bytes: 0,
             pty_core_time: Duration::ZERO,
+            core_fast_sgr_time: Duration::ZERO,
+            core_fast_text_time: Duration::ZERO,
+            core_parser_time: Duration::ZERO,
+            core_apply_time: Duration::ZERO,
+            core_tick_time: Duration::ZERO,
+            core_fast_sgr_calls: 0,
+            core_fast_text_calls: 0,
+            core_parser_bytes: 0,
+            core_actions: 0,
             damage_regions: 0,
             frames: 0,
             full_uploads: 0,
@@ -935,7 +957,13 @@ impl PerfStats {
         }
     }
 
-    fn record_pty(&mut self, bytes: usize, damage_regions: usize, core_time: Duration) {
+    fn record_pty(
+        &mut self,
+        bytes: usize,
+        damage_regions: usize,
+        core_time: Duration,
+        core_profile: CoreProfile,
+    ) {
         if !self.enabled {
             return;
         }
@@ -943,6 +971,15 @@ impl PerfStats {
         self.pty_bytes += bytes as u64;
         self.damage_regions += damage_regions as u64;
         self.pty_core_time += core_time;
+        self.core_fast_sgr_time += core_profile.fast_sgr_time;
+        self.core_fast_text_time += core_profile.fast_text_time;
+        self.core_parser_time += core_profile.parser_time;
+        self.core_apply_time += core_profile.apply_time;
+        self.core_tick_time += core_profile.tick_time;
+        self.core_fast_sgr_calls += core_profile.fast_sgr_calls;
+        self.core_fast_text_calls += core_profile.fast_text_calls;
+        self.core_parser_bytes += core_profile.parser_bytes;
+        self.core_actions += core_profile.actions;
         self.report_if_due();
     }
 
@@ -999,7 +1036,9 @@ impl PerfStats {
                 "termite-perf ",
                 "pty={:.2}MiB/s events={} damage={} ",
                 "frames={} full={} rows={} scrolls={} overlays={} ",
-                "core={:.2}ms cache={:.2}ms plugins={:.2}ms gpu={:.2}ms render={:.2}ms"
+                "core={:.2}ms fast_sgr={:.2}ms/{} fast_text={:.2}ms/{} ",
+                "parse={:.2}ms/{}B apply={:.2}ms/{} tick={:.2}ms ",
+                "cache={:.2}ms plugins={:.2}ms gpu={:.2}ms render={:.2}ms"
             ),
             mib / seconds,
             self.pty_events,
@@ -1010,6 +1049,15 @@ impl PerfStats {
             self.scroll_uploads,
             self.overlays,
             duration_ms(self.pty_core_time),
+            duration_ms(self.core_fast_sgr_time),
+            self.core_fast_sgr_calls,
+            duration_ms(self.core_fast_text_time),
+            self.core_fast_text_calls,
+            duration_ms(self.core_parser_time),
+            self.core_parser_bytes,
+            duration_ms(self.core_apply_time),
+            self.core_actions,
+            duration_ms(self.core_tick_time),
             duration_ms(self.cache_time),
             duration_ms(self.plugin_time),
             duration_ms(self.gpu_time),

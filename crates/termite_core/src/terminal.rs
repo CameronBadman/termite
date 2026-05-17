@@ -1,4 +1,7 @@
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use crate::{
     Cursor, DamageBatch, Grid, MouseTracking, ParserAction, ParserAdapter, SimpleParser, Style,
@@ -32,6 +35,19 @@ pub struct MouseState {
     pub sgr: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoreProfile {
+    pub fast_sgr_time: Duration,
+    pub fast_text_time: Duration,
+    pub parser_time: Duration,
+    pub apply_time: Duration,
+    pub tick_time: Duration,
+    pub fast_sgr_calls: u64,
+    pub fast_text_calls: u64,
+    pub parser_bytes: u64,
+    pub actions: u64,
+}
+
 #[derive(Debug)]
 pub struct TerminalCore<P = SimpleParser> {
     grid: Grid,
@@ -47,6 +63,8 @@ pub struct TerminalCore<P = SimpleParser> {
     clipboard: Vec<ClipboardStore>,
     output: Vec<u8>,
     actions: Vec<ParserAction>,
+    profile_enabled: bool,
+    profile: CoreProfile,
 }
 
 impl TerminalCore<SimpleParser> {
@@ -74,6 +92,8 @@ where
             clipboard: Vec::new(),
             output: Vec::new(),
             actions: Vec::new(),
+            profile_enabled: false,
+            profile: CoreProfile::default(),
         }
     }
 
@@ -108,6 +128,14 @@ where
         }
     }
 
+    pub fn set_profile_enabled(&mut self, enabled: bool) {
+        self.profile_enabled = enabled;
+    }
+
+    pub fn drain_profile(&mut self) -> CoreProfile {
+        std::mem::take(&mut self.profile)
+    }
+
     pub fn resize(&mut self, width: u16, height: u16) -> CoreTick {
         let _ = self.grid.resize(width, height);
         if let Some(grid) = &mut self.alternate_grid {
@@ -126,6 +154,10 @@ where
     }
 
     pub fn process_pty_input(&mut self, mut input: &[u8]) -> CoreTick {
+        if self.profile_enabled {
+            return self.process_pty_input_profiled(input);
+        }
+
         if input.is_empty() {
             return self.tick();
         }
@@ -154,6 +186,67 @@ where
         }
         self.actions = actions;
         self.tick()
+    }
+
+    fn process_pty_input_profiled(&mut self, mut input: &[u8]) -> CoreTick {
+        if input.is_empty() {
+            return self.profiled_tick();
+        }
+        while self.parser.can_process_ascii_fast_path() && !input.is_empty() {
+            if let Some(sgr_len) = self.profiled_fast_sgr(input) {
+                input = &input[sgr_len..];
+                continue;
+            }
+            let consumed = self.profiled_fast_text(input);
+            if consumed > 0 {
+                if consumed == input.len() {
+                    return self.profiled_tick();
+                }
+                input = &input[consumed..];
+                continue;
+            }
+            break;
+        }
+
+        let mut actions = std::mem::take(&mut self.actions);
+        actions.clear();
+        let started = Instant::now();
+        self.parser.parse(input, &mut actions);
+        self.profile.parser_time += started.elapsed();
+        self.profile.parser_bytes += input.len() as u64;
+
+        let action_count = actions.len();
+        let started = Instant::now();
+        for action in actions.drain(..) {
+            self.apply_action(action);
+        }
+        self.profile.apply_time += started.elapsed();
+        self.profile.actions += action_count as u64;
+        self.actions = actions;
+        self.profiled_tick()
+    }
+
+    fn profiled_fast_sgr(&mut self, input: &[u8]) -> Option<usize> {
+        let started = Instant::now();
+        let result = self.process_fast_sgr(input);
+        self.profile.fast_sgr_time += started.elapsed();
+        self.profile.fast_sgr_calls += 1;
+        result
+    }
+
+    fn profiled_fast_text(&mut self, input: &[u8]) -> usize {
+        let started = Instant::now();
+        let consumed = self.process_fast_text(input);
+        self.profile.fast_text_time += started.elapsed();
+        self.profile.fast_text_calls += 1;
+        consumed
+    }
+
+    fn profiled_tick(&mut self) -> CoreTick {
+        let started = Instant::now();
+        let tick = self.tick();
+        self.profile.tick_time += started.elapsed();
+        tick
     }
 
     fn process_fast_sgr(&mut self, input: &[u8]) -> Option<usize> {
