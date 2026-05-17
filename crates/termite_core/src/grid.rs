@@ -1257,14 +1257,25 @@ fn clamp_add(value: u16, delta: i16, limit: u16) -> u16 {
     }
 }
 
+pub(crate) fn is_fast_width1_char(ch: char) -> bool {
+    matches!(
+        ch,
+        ' '..='~'
+            | '\u{0370}'..='\u{03ff}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2010}'..='\u{201f}'
+            | '\u{2020}'..='\u{2027}'
+            | '\u{2030}'..='\u{205e}'
+            | '\u{2500}'..='\u{259f}'
+            | '\u{2800}'..='\u{28ff}'
+            | '\u{e000}'..='\u{f8ff}'
+    )
+}
+
 fn char_width(ch: char) -> u16 {
     match ch {
-        ' '..='~'
-        | '\u{0370}'..='\u{03ff}'
-        | '\u{2000}'..='\u{206f}'
-        | '\u{2500}'..='\u{259f}'
-        | '\u{e000}'..='\u{f8ff}' => 1,
         '\u{4e00}'..='\u{9fff}' => 2,
+        _ if is_fast_width1_char(ch) => 1,
         _ => UnicodeWidthChar::width(ch).unwrap_or(0).min(2) as u16,
     }
 }

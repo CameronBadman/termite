@@ -705,6 +705,15 @@ mod tests {
     }
 
     #[test]
+    fn fast_text_path_wraps_width_one_utf8_like_scalar_writes() {
+        let mut terminal = TerminalCore::new(4, 2);
+        let _ = terminal.process_pty_input("λπ┌─┐".as_bytes());
+
+        assert_eq!(row_text(terminal.grid(), 0), "λπ┌─");
+        assert_eq!(row_text(terminal.grid(), 1), "┐   ");
+    }
+
+    #[test]
     fn fast_sgr_path_resumes_fast_text_after_color_sequence() {
         let mut terminal = TerminalCore::new(5, 1);
         let _ = terminal.process_pty_input(b"\x1b[31mred\x1b[0m!");
