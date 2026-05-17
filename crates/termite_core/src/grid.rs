@@ -372,6 +372,65 @@ impl Grid {
         true
     }
 
+    pub(crate) fn put_scrolling_ascii_crlf_runs(
+        &mut self,
+        input: &[u8],
+        style: Style,
+    ) -> Option<(usize, char)> {
+        if self.pending_wrap
+            || self.cursor.x != 0
+            || self.cursor.y != self.scroll_bottom
+            || self.scroll_top != 0
+            || self.scroll_bottom != self.height.saturating_sub(1)
+            || input.is_empty()
+        {
+            return None;
+        }
+
+        let mut offset = 0;
+        let mut lines = 0usize;
+        let mut last_printed = None;
+        while offset < input.len() {
+            let line_start = offset;
+            let mut line_end = offset;
+            let max_end = (line_start + usize::from(self.width)).min(input.len());
+            while line_end < max_end
+                && (input[line_end].is_ascii_graphic() || input[line_end] == b' ')
+            {
+                line_end += 1;
+            }
+            if line_end == line_start || input.get(line_end..line_end + 2) != Some(b"\r\n") {
+                break;
+            }
+
+            let line = &input[line_start..line_end];
+            let physical_row = self.physical_row(self.cursor.y);
+            let may_have_wide = self.wide_rows.get(physical_row).copied().unwrap_or(true);
+            if may_have_wide
+                && self.write_range_touches_wide_cell(self.cursor.y, 0, line.len() as u16)
+            {
+                break;
+            }
+
+            self.put_ascii_row_before_scroll(line, style);
+            self.scroll_up_fullscreen_quiet();
+            last_printed = line.last().copied().map(char::from);
+            lines += 1;
+            offset = line_end + 2;
+        }
+
+        let last_printed = last_printed?;
+        self.generation = self.generation.saturating_add(lines as u64);
+        let count = lines.min(usize::from(self.height)) as u16;
+        self.damage.mark(DamageRegion::Scroll {
+            top: 0,
+            bottom: self.height.saturating_sub(1),
+            count,
+            down: false,
+        });
+        Some((offset, last_printed))
+    }
+
     pub(crate) fn put_width1_chars(&mut self, chars: &[char], style: Style) {
         let mut offset = 0;
         while offset < chars.len() {
@@ -923,6 +982,56 @@ impl Grid {
             count: count as u16,
             down,
         });
+    }
+
+    fn put_ascii_row_before_scroll(&mut self, bytes: &[u8], style: Style) {
+        debug_assert_eq!(self.cursor.x, 0);
+        debug_assert_eq!(self.cursor.y, self.scroll_bottom);
+
+        let physical_row = self.physical_row(self.cursor.y);
+        let row_start = physical_row * usize::from(self.width);
+        for (cell, byte) in self.cells[row_start..row_start + bytes.len()]
+            .iter_mut()
+            .zip(bytes)
+        {
+            *cell = Cell {
+                ch: char::from(*byte),
+                style,
+                wide: false,
+                spacer: false,
+            };
+        }
+        self.update_row_length_after_ascii_write(physical_row, 0, bytes, style);
+    }
+
+    fn scroll_up_fullscreen_quiet(&mut self) {
+        debug_assert_eq!(self.scroll_top, 0);
+        debug_assert_eq!(self.scroll_bottom, self.height.saturating_sub(1));
+
+        let width = usize::from(self.width);
+        let height = usize::from(self.height);
+        if height == 0 {
+            return;
+        }
+
+        let row_start = self.row_start(0);
+        let row_len = usize::from(self.row_length(0));
+        let buffer = self.scrolled_row_pool.pop();
+        self.scrolled_rows.push(scrollback_row_trimmed(
+            &self.cells[row_start..row_start + row_len],
+            buffer,
+        ));
+
+        self.row_offset = (self.row_offset + 1) % height;
+        let bottom_start = self.row_start(self.height.saturating_sub(1));
+        self.cells[bottom_start..bottom_start + width].fill(Cell::default());
+        let physical_row = self.physical_row(self.height.saturating_sub(1));
+        if let Some(wide) = self.wide_rows.get_mut(physical_row) {
+            *wide = false;
+        }
+        if let Some(length) = self.row_lengths.get_mut(physical_row) {
+            *length = 0;
+        }
     }
 
     fn mark_line_damage(&mut self, y: u16, x: u16, width: u16) {

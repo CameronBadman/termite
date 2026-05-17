@@ -387,6 +387,15 @@ where
                     continue;
                 }
                 if input.get(index..index + 2) == Some(b"\r\n")
+                    && let Some((consumed, last_printed)) = self
+                        .grid
+                        .put_scrolling_ascii_crlf_runs(&input[start..], self.style)
+                {
+                    self.last_printed = last_printed;
+                    index = start + consumed;
+                    continue;
+                }
+                if input.get(index..index + 2) == Some(b"\r\n")
                     && self.grid.put_ascii_run_crlf(run, self.style)
                 {
                     index += 2;
