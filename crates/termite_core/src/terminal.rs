@@ -64,6 +64,7 @@ pub struct TerminalCore<P = SimpleParser> {
     clipboard: Vec<ClipboardStore>,
     output: Vec<u8>,
     actions: Vec<ParserAction>,
+    fast_width1_chars: Vec<char>,
     profile_enabled: bool,
     profile: CoreProfile,
 }
@@ -93,6 +94,7 @@ where
             clipboard: Vec::new(),
             output: Vec::new(),
             actions: Vec::new(),
+            fast_width1_chars: Vec::new(),
             profile_enabled: false,
             profile: CoreProfile::default(),
         }
@@ -375,11 +377,11 @@ where
                 let run = &input[start..index];
                 self.last_printed = char::from(input[index - 1]);
                 if fast_width1_char_at(input, index).is_some()
-                    && let Some(run) = scan_fast_width1_run(input, start)
+                    && let Some(run) =
+                        scan_fast_width1_run(input, start, None, &mut self.fast_width1_chars)
                 {
-                    let text = std::str::from_utf8(&input[start..run.end])
-                        .expect("fast width-one text run is valid UTF-8");
-                    self.grid.put_width1_text_run(text, self.style);
+                    self.grid
+                        .put_width1_chars(&self.fast_width1_chars, self.style);
                     self.last_printed = run.last;
                     index = run.end;
                     continue;
@@ -397,11 +399,11 @@ where
                 && !ch.is_control()
             {
                 if is_fast_width1_non_ascii(ch)
-                    && let Some(run) = scan_fast_width1_run(input, index)
+                    && let Some(run) =
+                        scan_fast_width1_run(input, index, Some(ch), &mut self.fast_width1_chars)
                 {
-                    let text = std::str::from_utf8(&input[index..run.end])
-                        .expect("fast width-one text run is valid UTF-8");
-                    self.grid.put_width1_text_run(text, self.style);
+                    self.grid
+                        .put_width1_chars(&self.fast_width1_chars, self.style);
                     self.last_printed = run.last;
                     index = run.end;
                     continue;
@@ -533,10 +535,11 @@ where
                 }
                 self.last_printed = char::from(bytes[index - 1]);
                 if fast_width1_char_at(bytes, index).is_some()
-                    && let Some(run) = scan_fast_width1_run(bytes, start)
+                    && let Some(run) =
+                        scan_fast_width1_run(bytes, start, None, &mut self.fast_width1_chars)
                 {
                     self.grid
-                        .put_width1_text_run(&text[start..run.end], self.style);
+                        .put_width1_chars(&self.fast_width1_chars, self.style);
                     self.last_printed = run.last;
                     index = run.end;
                     continue;
@@ -547,10 +550,11 @@ where
 
             let ch = text[index..].chars().next().expect("valid char boundary");
             if is_fast_width1_non_ascii(ch)
-                && let Some(run) = scan_fast_width1_run(bytes, index)
+                && let Some(run) =
+                    scan_fast_width1_run(bytes, index, Some(ch), &mut self.fast_width1_chars)
             {
                 self.grid
-                    .put_width1_text_run(&text[index..run.end], self.style);
+                    .put_width1_chars(&self.fast_width1_chars, self.style);
                 self.last_printed = run.last;
                 index = run.end;
                 continue;
@@ -701,14 +705,28 @@ struct FastWidth1Run {
     last: char,
 }
 
-fn scan_fast_width1_run(input: &[u8], start: usize) -> Option<FastWidth1Run> {
+fn scan_fast_width1_run(
+    input: &[u8],
+    start: usize,
+    first: Option<char>,
+    chars: &mut Vec<char>,
+) -> Option<FastWidth1Run> {
+    chars.clear();
     let mut index = start;
     let mut last = None;
-    let mut saw_non_ascii = false;
+    let mut saw_non_ascii = first.is_some();
+    if let Some(ch) = first {
+        chars.push(ch);
+        last = Some(ch);
+        index += ch.len_utf8();
+    }
+
     while index < input.len() {
         let byte = input[index];
         if byte.is_ascii_graphic() || byte == b' ' {
-            last = Some(char::from(byte));
+            let ch = char::from(byte);
+            chars.push(ch);
+            last = Some(ch);
             index += 1;
             continue;
         }
@@ -716,6 +734,7 @@ fn scan_fast_width1_run(input: &[u8], start: usize) -> Option<FastWidth1Run> {
             break;
         };
         saw_non_ascii = true;
+        chars.push(ch);
         last = Some(ch);
         index += ch.len_utf8();
     }

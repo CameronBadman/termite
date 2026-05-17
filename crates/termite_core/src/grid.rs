@@ -372,30 +372,24 @@ impl Grid {
         true
     }
 
-    pub(crate) fn put_width1_text_run(&mut self, text: &str, style: Style) {
+    pub(crate) fn put_width1_chars(&mut self, chars: &[char], style: Style) {
         let mut offset = 0;
-        while offset < text.len() {
+        while offset < chars.len() {
             self.apply_pending_wrap();
 
             let x = self.cursor.x;
             let y = self.cursor.y;
             let physical_row = self.physical_row(y);
             let available = usize::from(self.width.saturating_sub(x)).max(1);
-            let mut count = 0usize;
-            let mut end = offset;
-            for ch in text[offset..].chars().take(available) {
-                count += 1;
-                end += ch.len_utf8();
-            }
+            let count = available.min(chars.len() - offset);
             if count == 0 {
                 break;
             }
 
             let may_have_wide = self.wide_rows.get(physical_row).copied().unwrap_or(true);
             if may_have_wide && self.write_range_touches_wide_cell(y, x, count as u16) {
-                let ch = text[offset..].chars().next().expect("non-empty text run");
-                let _ = self.put_char(ch, style);
-                offset += ch.len_utf8();
+                let _ = self.put_char(chars[offset], style);
+                offset += 1;
                 continue;
             }
 
@@ -404,7 +398,7 @@ impl Grid {
             let mut used_end = None;
             for (index, (cell, ch)) in self.cells[start..start + count]
                 .iter_mut()
-                .zip(text[offset..end].chars())
+                .zip(chars[offset..offset + count].iter().copied())
                 .enumerate()
             {
                 *cell = Cell {
@@ -420,7 +414,7 @@ impl Grid {
             self.update_row_length_after_text_write(physical_row, x, count as u16, used_end);
             self.mark_line_damage(y, x, count as u16);
             self.advance_cursor(count as u16);
-            offset = end;
+            offset += count;
         }
     }
 
