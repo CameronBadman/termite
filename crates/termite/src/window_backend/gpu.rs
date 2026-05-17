@@ -1,4 +1,4 @@
-use std::{borrow::Cow, error::Error, sync::Arc};
+use std::{borrow::Cow, error::Error, sync::Arc, time::Instant};
 
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -22,6 +22,10 @@ fn select_alpha_mode(modes: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlpha
     }
 }
 
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
 pub(super) struct GpuRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -42,23 +46,39 @@ pub(super) struct GpuRenderer {
     pipeline: wgpu::RenderPipeline,
 }
 
+pub(super) struct GpuRendererConfig {
+    pub(super) surface_size: PhysicalSize<u32>,
+    pub(super) texture_width: u32,
+    pub(super) texture_height: u32,
+    pub(super) metrics: TerminalMetrics,
+    pub(super) background: [u8; 3],
+    pub(super) cursor_color: [u8; 3],
+    pub(super) profile: bool,
+}
+
 impl GpuRenderer {
     pub(super) fn new(
         window: Arc<Window>,
-        surface_size: PhysicalSize<u32>,
-        texture_width: u32,
-        texture_height: u32,
-        metrics: TerminalMetrics,
-        background: [u8; 3],
-        cursor_color: [u8; 3],
+        renderer_config: GpuRendererConfig,
     ) -> Result<Self, Box<dyn Error>> {
-        let instance = wgpu::Instance::default();
+        let total_started = Instant::now();
+        let started = Instant::now();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let instance_ms = elapsed_ms(started);
+        let started = Instant::now();
         let surface = instance.create_surface(window)?;
+        let surface_ms = elapsed_ms(started);
+        let started = Instant::now();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::None,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
         }))?;
+        let adapter_ms = elapsed_ms(started);
+        let started = Instant::now();
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("termite device"),
@@ -66,8 +86,10 @@ impl GpuRenderer {
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()
             }))?;
-        let surface_width = surface_size.width.max(1);
-        let surface_height = surface_size.height.max(1);
+        let device_ms = elapsed_ms(started);
+        let started = Instant::now();
+        let surface_width = renderer_config.surface_size.width.max(1);
+        let surface_height = renderer_config.surface_size.height.max(1);
         let caps = surface.get_capabilities(&adapter);
         let mut config = surface
             .get_default_config(&adapter, surface_width, surface_height)
@@ -75,7 +97,9 @@ impl GpuRenderer {
         config.alpha_mode = select_alpha_mode(&caps.alpha_modes);
         let premultiply_alpha = config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
         surface.configure(&device, &config);
+        let configure_ms = elapsed_ms(started);
 
+        let started = Instant::now();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("termite blit shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BLIT_SHADER)),
@@ -101,7 +125,9 @@ impl GpuRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let pipeline_ms = elapsed_ms(started);
 
+        let started = Instant::now();
         let cursor_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("termite global uniform"),
             size: 64,
@@ -114,8 +140,16 @@ impl GpuRenderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let texture = create_frame_texture(&device, texture_width, texture_height);
-        let scratch_texture = create_scratch_texture(&device, texture_width, texture_height);
+        let texture = create_frame_texture(
+            &device,
+            renderer_config.texture_width,
+            renderer_config.texture_height,
+        );
+        let scratch_texture = create_scratch_texture(
+            &device,
+            renderer_config.texture_width,
+            renderer_config.texture_height,
+        );
         let bind_group = create_frame_bind_group(
             &device,
             &pipeline,
@@ -123,6 +157,26 @@ impl GpuRenderer {
             &cursor_buffer,
             &overlay_buffer,
         );
+        let resources_ms = elapsed_ms(started);
+
+        if renderer_config.profile {
+            eprintln!(
+                concat!(
+                    "termite-profile gpu_init ",
+                    "total={:.2}ms instance={:.2}ms surface={:.2}ms ",
+                    "adapter={:.2}ms device={:.2}ms configure={:.2}ms ",
+                    "pipeline={:.2}ms resources={:.2}ms"
+                ),
+                elapsed_ms(total_started),
+                instance_ms,
+                surface_ms,
+                adapter_ms,
+                device_ms,
+                configure_ms,
+                pipeline_ms,
+                resources_ms,
+            );
+        }
 
         Ok(Self {
             surface,
@@ -131,11 +185,11 @@ impl GpuRenderer {
             config,
             texture,
             scratch_texture,
-            texture_width,
-            texture_height,
-            metrics,
-            background,
-            cursor_color,
+            texture_width: renderer_config.texture_width,
+            texture_height: renderer_config.texture_height,
+            metrics: renderer_config.metrics,
+            background: renderer_config.background,
+            cursor_color: renderer_config.cursor_color,
             cursor_buffer,
             overlay_buffer,
             overlay_bytes: [0; MAX_OVERLAYS * OVERLAY_BYTES],

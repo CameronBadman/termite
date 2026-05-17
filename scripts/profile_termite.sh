@@ -69,6 +69,6 @@ awk -v ns="$elapsed_ns" -v status="$status" 'BEGIN {
 }'
 
 printf '\n== termite-perf samples ==\n'
-if ! rg 'termite-perf' "$log"; then
+if ! rg 'termite-profile|termite-perf' "$log"; then
     printf 'no TERMITE_PERF samples captured; increase LINES or inspect %s\n' "$log"
 fi

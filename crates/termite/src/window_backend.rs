@@ -37,7 +37,7 @@ mod render_cache;
 mod selection;
 mod text;
 
-use gpu::GpuRenderer;
+use gpu::{GpuRenderer, GpuRendererConfig};
 use input::{
     active_mouse_button, encode_mouse_event, encode_window_key, mouse_button_code, mouse_cell,
     shortcut_key, wheel_codes, wheel_scroll_lines,
@@ -172,6 +172,9 @@ impl WindowBackend {
             return Ok(());
         }
 
+        let profile = self.perf.enabled;
+        let total_started = Instant::now();
+        let started = Instant::now();
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
@@ -181,21 +184,34 @@ impl WindowBackend {
                     .with_min_inner_size(LogicalSize::new(320, 200)),
             )?,
         );
+        let window_ms = duration_ms(started.elapsed());
 
+        let started = Instant::now();
         let size = window.inner_size();
         let (cols, rows) = grid_size(size, self.metrics);
+        let grid_ms = duration_ms(started.elapsed());
+        let started = Instant::now();
         let renderer = GpuRenderer::new(
             window.clone(),
-            size,
-            buffer_width(cols, self.metrics),
-            buffer_height(rows, self.metrics),
-            self.metrics,
-            self.theme.background,
-            self.theme.cursor,
+            GpuRendererConfig {
+                surface_size: size,
+                texture_width: buffer_width(cols, self.metrics),
+                texture_height: buffer_height(rows, self.metrics),
+                metrics: self.metrics,
+                background: self.theme.background,
+                cursor_color: self.theme.cursor,
+                profile,
+            },
         )?;
+        let renderer_ms = duration_ms(started.elapsed());
+        let started = Instant::now();
         let mut child = spawn_shell(&self.shell, cols, rows)?;
+        let pty_spawn_ms = duration_ms(started.elapsed());
+        let started = Instant::now();
         spawn_pty_reader(&mut child, self.proxy.clone())?;
+        let pty_reader_ms = duration_ms(started.elapsed());
 
+        let started = Instant::now();
         self.cols = cols;
         self.rows = rows;
         self.render_cache.resize(cols, rows);
@@ -204,6 +220,25 @@ impl WindowBackend {
         self.child = Some(child);
         self.window = Some(window);
         self.schedule_delayed_render(Instant::now());
+        let state_ms = duration_ms(started.elapsed());
+        if profile {
+            eprintln!(
+                concat!(
+                    "termite-profile startup ",
+                    "total={:.2}ms window={:.2}ms grid={:.2}ms renderer={:.2}ms ",
+                    "pty_spawn={:.2}ms pty_reader={:.2}ms state={:.2}ms cols={} rows={}"
+                ),
+                duration_ms(total_started.elapsed()),
+                window_ms,
+                grid_ms,
+                renderer_ms,
+                pty_spawn_ms,
+                pty_reader_ms,
+                state_ms,
+                cols,
+                rows,
+            );
+        }
         Ok(())
     }
 
