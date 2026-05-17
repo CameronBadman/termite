@@ -4,6 +4,9 @@ use crate::{DamageRegion, DamageTracker, EraseMode, Generation};
 use unicode_width::UnicodeWidthChar;
 
 const SCROLLED_ROW_POOL_LIMIT: usize = 1024;
+const STYLE_BOLD: u8 = 1 << 0;
+const STYLE_ITALIC: u8 = 1 << 1;
+const STYLE_UNDERLINE: u8 = 1 << 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -17,9 +20,7 @@ pub enum Color {
 pub struct Style {
     pub foreground: Color,
     pub background: Color,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
+    flags: u8,
 }
 
 impl Default for Style {
@@ -27,10 +28,46 @@ impl Default for Style {
         Self {
             foreground: Color::DefaultForeground,
             background: Color::DefaultBackground,
-            bold: false,
-            italic: false,
-            underline: false,
+            flags: 0,
         }
+    }
+}
+
+impl Style {
+    pub fn bold(self) -> bool {
+        self.flags & STYLE_BOLD != 0
+    }
+
+    pub fn italic(self) -> bool {
+        self.flags & STYLE_ITALIC != 0
+    }
+
+    pub fn underline(self) -> bool {
+        self.flags & STYLE_UNDERLINE != 0
+    }
+
+    pub fn set_bold(&mut self, enabled: bool) {
+        self.set_flag(STYLE_BOLD, enabled);
+    }
+
+    pub fn set_italic(&mut self, enabled: bool) {
+        self.set_flag(STYLE_ITALIC, enabled);
+    }
+
+    pub fn set_underline(&mut self, enabled: bool) {
+        self.set_flag(STYLE_UNDERLINE, enabled);
+    }
+
+    fn set_flag(&mut self, flag: u8, enabled: bool) {
+        if enabled {
+            self.flags |= flag;
+        } else {
+            self.flags &= !flag;
+        }
+    }
+
+    pub fn attribute_bits(self) -> u8 {
+        self.flags
     }
 }
 

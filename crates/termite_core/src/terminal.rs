@@ -286,15 +286,15 @@ where
                 Some(4)
             }
             [0x1b, b'[', b'1', b'm', ..] => {
-                self.style.bold = true;
+                self.style.set_bold(true);
                 Some(4)
             }
             [0x1b, b'[', b'3', b'm', ..] => {
-                self.style.italic = true;
+                self.style.set_italic(true);
                 Some(4)
             }
             [0x1b, b'[', b'4', b'm', ..] => {
-                self.style.underline = true;
+                self.style.set_underline(true);
                 Some(4)
             }
             [0x1b, b'[', b'3', digit @ b'0'..=b'7', b'm', ..] => {
@@ -318,15 +318,15 @@ where
                 Some(5)
             }
             [0x1b, b'[', b'2', b'2', b'm', ..] => {
-                self.style.bold = false;
+                self.style.set_bold(false);
                 Some(5)
             }
             [0x1b, b'[', b'2', b'3', b'm', ..] => {
-                self.style.italic = false;
+                self.style.set_italic(false);
                 Some(5)
             }
             [0x1b, b'[', b'2', b'4', b'm', ..] => {
-                self.style.underline = false;
+                self.style.set_underline(false);
                 Some(5)
             }
             [0x1b, b'[', b'1', b'0', digit @ b'0'..=b'7', b'm', ..] => {
@@ -340,12 +340,12 @@ where
     fn apply_fast_sgr_code(&mut self, code: u16) -> Option<()> {
         match code {
             0 => self.style = Style::default(),
-            1 => self.style.bold = true,
-            3 => self.style.italic = true,
-            4 => self.style.underline = true,
-            22 => self.style.bold = false,
-            23 => self.style.italic = false,
-            24 => self.style.underline = false,
+            1 => self.style.set_bold(true),
+            3 => self.style.set_italic(true),
+            4 => self.style.set_underline(true),
+            22 => self.style.set_bold(false),
+            23 => self.style.set_italic(false),
+            24 => self.style.set_underline(false),
             30..=37 => self.style.foreground = crate::Color::Indexed((code - 30) as u8),
             39 => self.style.foreground = crate::Color::DefaultForeground,
             40..=47 => self.style.background = crate::Color::Indexed((code - 40) as u8),
@@ -522,9 +522,9 @@ where
         match update {
             StyleUpdate::Foreground(color) => self.style.foreground = color,
             StyleUpdate::Background(color) => self.style.background = color,
-            StyleUpdate::Bold(enabled) => self.style.bold = enabled,
-            StyleUpdate::Italic(enabled) => self.style.italic = enabled,
-            StyleUpdate::Underline(enabled) => self.style.underline = enabled,
+            StyleUpdate::Bold(enabled) => self.style.set_bold(enabled),
+            StyleUpdate::Italic(enabled) => self.style.set_italic(enabled),
+            StyleUpdate::Underline(enabled) => self.style.set_underline(enabled),
         }
     }
 
@@ -1008,7 +1008,7 @@ mod tests {
         let cell = terminal.grid().cell(0, 0).unwrap();
 
         assert_eq!(cell.style.foreground, crate::Color::Indexed(1));
-        assert!(cell.style.bold);
+        assert!(cell.style.bold());
     }
 
     #[test]

@@ -193,7 +193,7 @@ impl TextRenderer {
                 x += 1;
                 continue;
             }
-            if cell.ch == ' ' && !cell.style.underline {
+            if cell.ch == ' ' && !cell.style.underline() {
                 x += 1;
                 continue;
             }
@@ -304,7 +304,7 @@ impl TextRenderer {
             }
         }
 
-        if run.first.style.underline {
+        if run.first.style.underline() {
             draw_underline_span(
                 frame,
                 width,
@@ -374,7 +374,7 @@ impl TextRenderer {
 
         if ch != ' ' {
             if let Some(key) = self.glyph_key(ch, style, columns) {
-                let synthetic_bold = style.bold && !self.fonts[key.font].role.is_bold();
+                let synthetic_bold = style.bold() && !self.fonts[key.font].role.is_bold();
                 let glyph_metrics = glyph_metrics(self.metrics, columns);
                 self.ensure_glyph(key, glyph_metrics);
                 if let Some(glyph) = self.glyphs.get(&key) {
@@ -408,10 +408,10 @@ impl TextRenderer {
                     }
                 }
             } else {
-                draw_bitmap_cell(frame, width, cell_x, cell_y, ch, style.bold, paint);
+                draw_bitmap_cell(frame, width, cell_x, cell_y, ch, style.bold(), paint);
             }
         }
-        if style.underline {
+        if style.underline() {
             draw_underline_span(frame, width, cell_x, cell_y, columns, fg, self.metrics);
         }
     }
@@ -450,8 +450,8 @@ impl TextRenderer {
 
         let key = FontLookupKey {
             ch,
-            bold: style.bold,
-            italic: style.italic,
+            bold: style.bold(),
+            italic: style.italic(),
         };
         if let Some(index) = self.extended_font_lookup.get(&key) {
             return *index;
@@ -513,7 +513,7 @@ impl TextRenderer {
         let units_per_em = face.units_per_em() as f32;
         let scale = self.fonts[font].scale.x / units_per_em.max(1.0);
         let max_x = self.metrics.cell_width as f32 * f32::from(columns.max(1));
-        let synthetic_bold = style.bold && !self.fonts[font].role.is_bold();
+        let synthetic_bold = style.bold() && !self.fonts[font].role.is_bold();
         let mut x = 0.0;
         let mut glyphs = Vec::with_capacity(infos.len());
         for (info, position) in infos.iter().zip(positions) {
@@ -636,7 +636,7 @@ fn load_fonts(font: FontConfig) -> Vec<LoadedFont> {
 }
 
 fn preferred_font_roles(style: Style) -> &'static [FontRole] {
-    match (style.bold, style.italic) {
+    match (style.bold(), style.italic()) {
         (true, true) => &[
             FontRole::BoldItalic,
             FontRole::Bold,
@@ -650,7 +650,7 @@ fn preferred_font_roles(style: Style) -> &'static [FontRole] {
 }
 
 fn font_style_index(style: Style) -> usize {
-    usize::from(style.bold) | (usize::from(style.italic) << 1)
+    usize::from(style.attribute_bits() & 0b11)
 }
 
 fn font_role_from_path(path: &str) -> FontRole {
