@@ -231,9 +231,12 @@ impl Grid {
 
         let x = self.cursor.x;
         let y = self.cursor.y;
-        let (mut damage_start, mut damage_end, mut changed) = self.clear_cell_for_write(x, y);
+        let physical_row = self.physical_row(y);
+        let row_start = physical_row * usize::from(self.width);
+        let (mut damage_start, mut damage_end, mut changed) =
+            self.clear_cell_for_write_in_row(row_start, x, y);
         if width > 1 && x + 1 < self.width {
-            let (start, end, range_changed) = self.clear_cell_for_write(x + 1, y);
+            let (start, end, range_changed) = self.clear_cell_for_write_in_row(row_start, x + 1, y);
             damage_start = damage_start.min(start);
             damage_end = damage_end.max(end);
             changed |= range_changed;
@@ -245,27 +248,34 @@ impl Grid {
             wide: width > 1,
             spacer: false,
         };
-        changed |= self.replace_cell(x, y, cell);
+        let index = row_start + usize::from(x);
+        if self.cells[index] != cell {
+            self.cells[index] = cell;
+            changed = true;
+        }
         damage_start = damage_start.min(x);
         damage_end = damage_end.max(x);
 
         if width > 1 && x + 1 < self.width {
-            changed |= self.replace_cell(
-                x + 1,
-                y,
-                Cell {
-                    ch: ' ',
-                    style,
-                    wide: false,
-                    spacer: true,
-                },
-            );
+            let spacer_index = index + 1;
+            let spacer = Cell {
+                ch: ' ',
+                style,
+                wide: false,
+                spacer: true,
+            };
+            if self.cells[spacer_index] != spacer {
+                self.cells[spacer_index] = spacer;
+                changed = true;
+            }
             damage_end = damage_end.max(x + 1);
         }
-        if width > 1 {
-            self.mark_row_has_wide_state(y);
+        if width > 1
+            && let Some(wide) = self.wide_rows.get_mut(physical_row)
+        {
+            *wide = true;
         }
-        self.update_row_length_after_write(y, x, width);
+        self.update_physical_row_length_after_write(physical_row, x, width, cell);
 
         if changed {
             self.mark_line_damage(y, damage_start, damage_end - damage_start + 1);
@@ -1016,10 +1026,19 @@ impl Grid {
             return (x, x, false);
         }
 
+        let row_start = self.row_start(y);
+        self.clear_cell_for_write_in_row(row_start, x, y)
+    }
+
+    fn clear_cell_for_write_in_row(
+        &mut self,
+        row_start: usize,
+        x: u16,
+        y: u16,
+    ) -> (u16, u16, bool) {
         let mut start = x;
         let mut end = x;
         let mut changed = false;
-        let row_start = self.row_start(y);
         let index = row_start + usize::from(x);
 
         if self.cells[index].spacer && x > 0 {
@@ -1101,24 +1120,21 @@ impl Grid {
             .unwrap_or(self.width)
     }
 
-    fn mark_row_used_through(&mut self, y: u16, end: u16) {
-        let row = self.physical_row(y);
-        if let Some(length) = self.row_lengths.get_mut(row) {
-            *length = (*length).max(end.min(self.width));
-        }
-    }
-
-    fn update_row_length_after_write(&mut self, y: u16, x: u16, width: u16) {
+    fn update_physical_row_length_after_write(
+        &mut self,
+        row: usize,
+        x: u16,
+        width: u16,
+        cell: Cell,
+    ) {
         let end = x.saturating_add(width).min(self.width);
-        let row = self.physical_row(y);
         let current = self.row_lengths.get(row).copied().unwrap_or(0);
-        let Some(index) = self.index(x, y) else {
-            return;
-        };
-        if self.cells[index] != Cell::default() || width > 1 {
-            self.mark_row_used_through(y, end);
+        if cell != Cell::default() || width > 1 {
+            if let Some(length) = self.row_lengths.get_mut(row) {
+                *length = (*length).max(end);
+            }
         } else if x < current && end >= current {
-            self.refresh_row_length(y);
+            self.refresh_physical_row_length(row);
         }
     }
 
@@ -1242,7 +1258,15 @@ fn clamp_add(value: u16, delta: i16, limit: u16) -> u16 {
 }
 
 fn char_width(ch: char) -> u16 {
-    UnicodeWidthChar::width(ch).unwrap_or(0).min(2) as u16
+    match ch {
+        ' '..='~'
+        | '\u{0370}'..='\u{03ff}'
+        | '\u{2000}'..='\u{206f}'
+        | '\u{2500}'..='\u{259f}'
+        | '\u{e000}'..='\u{f8ff}' => 1,
+        '\u{4e00}'..='\u{9fff}' => 2,
+        _ => UnicodeWidthChar::width(ch).unwrap_or(0).min(2) as u16,
+    }
 }
 
 fn blank_row(width: u16) -> Vec<Cell> {
