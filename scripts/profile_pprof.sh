@@ -83,14 +83,18 @@ fi
 
 if [[ -s "$profile" ]]; then
     printf '\n== hottest flamegraph frames ==\n'
-    perl -0ne 'while (/<title>(.*?)<\/title>/g) { print "$1\n" }' "$profile" \
-        | sort -t '(' -k2,2nr \
-        | head -n 20
+    mapfile -t hottest_frames < <(
+        perl -0ne 'while (/<title>(.*?)<\/title>/g) { print "$1\n" }' "$profile" \
+            | sort -t '(' -k2,2nr
+    )
+    printf '%s\n' "${hottest_frames[@]:0:20}"
 
     printf '\n== hottest termite frames ==\n'
-    perl -0ne 'while (/<title>(.*?)<\/title>/g) { print "$1\n" }' "$profile" \
-        | rg 'termite(_core)?::' \
-        | rg -v 'termite::main|profiler::run|runner::Runner::run' \
-        | sort -t '(' -k2,2nr \
-        | head -n 20
+    mapfile -t hottest_termite_frames < <(
+        perl -0ne 'while (/<title>(.*?)<\/title>/g) { print "$1\n" }' "$profile" \
+            | rg 'termite(_core)?::' \
+            | rg -v 'termite::main|profiler::run|runner::Runner::run' \
+            | sort -t '(' -k2,2nr
+    )
+    printf '%s\n' "${hottest_termite_frames[@]:0:20}"
 fi
