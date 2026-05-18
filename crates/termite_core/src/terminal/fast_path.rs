@@ -251,14 +251,96 @@ where
 
 fn decode_utf8_char(input: &[u8], index: usize) -> Option<char> {
     let first = *input.get(index)?;
-    let len = match first {
-        0xc2..=0xdf => 2,
-        0xe0..=0xef => 3,
-        0xf0..=0xf4 => 4,
-        _ => return None,
-    };
-    let bytes = input.get(index..index + len)?;
-    std::str::from_utf8(bytes).ok()?.chars().next()
+    match first {
+        0xc2..=0xdf => {
+            let second = *input.get(index + 1)?;
+            continuation(second)?;
+            char::from_u32(((u32::from(first & 0x1f)) << 6) | u32::from(second & 0x3f))
+        }
+        0xe0 => decode_utf8_three(
+            first,
+            *input.get(index + 1)?,
+            *input.get(index + 2)?,
+            0xa0,
+            0xbf,
+        ),
+        0xe1..=0xec | 0xee..=0xef => decode_utf8_three(
+            first,
+            *input.get(index + 1)?,
+            *input.get(index + 2)?,
+            0x80,
+            0xbf,
+        ),
+        0xed => decode_utf8_three(
+            first,
+            *input.get(index + 1)?,
+            *input.get(index + 2)?,
+            0x80,
+            0x9f,
+        ),
+        0xf0 => decode_utf8_four(
+            first,
+            *input.get(index + 1)?,
+            *input.get(index + 2)?,
+            *input.get(index + 3)?,
+            0x90,
+            0xbf,
+        ),
+        0xf1..=0xf3 => decode_utf8_four(
+            first,
+            *input.get(index + 1)?,
+            *input.get(index + 2)?,
+            *input.get(index + 3)?,
+            0x80,
+            0xbf,
+        ),
+        0xf4 => decode_utf8_four(
+            first,
+            *input.get(index + 1)?,
+            *input.get(index + 2)?,
+            *input.get(index + 3)?,
+            0x80,
+            0x8f,
+        ),
+        _ => None,
+    }
+}
+
+fn decode_utf8_three(
+    first: u8,
+    second: u8,
+    third: u8,
+    second_min: u8,
+    second_max: u8,
+) -> Option<char> {
+    (second >= second_min && second <= second_max).then_some(())?;
+    continuation(third)?;
+    let value = ((u32::from(first & 0x0f)) << 12)
+        | ((u32::from(second & 0x3f)) << 6)
+        | u32::from(third & 0x3f);
+    char::from_u32(value)
+}
+
+fn decode_utf8_four(
+    first: u8,
+    second: u8,
+    third: u8,
+    fourth: u8,
+    second_min: u8,
+    second_max: u8,
+) -> Option<char> {
+    (second >= second_min && second <= second_max).then_some(())?;
+    continuation(third)?;
+    continuation(fourth)?;
+    let value = ((u32::from(first & 0x07)) << 18)
+        | ((u32::from(second & 0x3f)) << 12)
+        | ((u32::from(third & 0x3f)) << 6)
+        | u32::from(fourth & 0x3f);
+    char::from_u32(value)
+}
+
+fn continuation(byte: u8) -> Option<()> {
+    (byte & 0xc0 == 0x80).then_some(())
 }
 
 #[derive(Debug, Clone, Copy)]

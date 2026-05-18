@@ -358,7 +358,7 @@ impl Grid {
         let old = self.cursor;
         self.cursor.x = 0;
         if self.cursor.y == self.scroll_bottom {
-            self.scroll_up_region();
+            self.scroll_up_region_fast();
         } else {
             self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
         }
@@ -490,7 +490,7 @@ impl Grid {
         self.pending_wrap = false;
         self.cursor.x = 0;
         if self.cursor.y == self.scroll_bottom {
-            self.scroll_up_region();
+            self.scroll_up_region_fast();
         } else {
             self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
         }
@@ -1070,7 +1070,7 @@ impl Grid {
         let old = self.cursor;
         self.pending_wrap = false;
         if self.cursor.y == self.scroll_bottom {
-            self.scroll_up_region();
+            self.scroll_up_region_fast();
         } else {
             self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
         }
@@ -1104,6 +1104,22 @@ impl Grid {
         self.scroll_up(1);
     }
 
+    fn scroll_up_region_fast(&mut self) {
+        if self.scroll_top == 0 && self.scroll_bottom == self.height.saturating_sub(1) {
+            self.scroll_up_fullscreen_quiet();
+            self.generation += 1;
+            self.damage.mark(DamageRegion::Scroll {
+                top: 0,
+                bottom: self.height.saturating_sub(1),
+                count: 1,
+                down: false,
+            });
+            return;
+        }
+
+        self.scroll_up_region();
+    }
+
     fn scroll_down_region(&mut self) {
         self.scroll_down(1);
     }
@@ -1117,7 +1133,7 @@ impl Grid {
         let old = self.cursor;
         self.cursor.x = 0;
         if self.cursor.y == self.scroll_bottom {
-            self.scroll_up_region();
+            self.scroll_up_region_fast();
         } else {
             self.cursor.y = (self.cursor.y + 1).min(self.height - 1);
         }
