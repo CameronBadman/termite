@@ -286,6 +286,14 @@ impl Grid {
     }
 
     pub fn put_ascii_run(&mut self, bytes: &[u8], style: Style) {
+        let available = usize::from(self.width.saturating_sub(self.cursor.x));
+        if (self.pending_wrap || bytes.len() > available)
+            && self.cursor.y == self.scroll_bottom
+            && self.put_wrapped_ascii_run_at_bottom(bytes, style)
+        {
+            return;
+        }
+
         let mut offset = 0;
         while offset < bytes.len() {
             self.apply_pending_wrap();
@@ -325,6 +333,76 @@ impl Grid {
         }
     }
 
+    fn put_wrapped_ascii_run_at_bottom(&mut self, bytes: &[u8], style: Style) -> bool {
+        if bytes.is_empty()
+            || !self.wrap
+            || self.cursor.y != self.scroll_bottom
+            || self.scroll_top != 0
+            || self.scroll_bottom != self.height.saturating_sub(1)
+        {
+            return false;
+        }
+
+        let first_x = if self.pending_wrap { 0 } else { self.cursor.x };
+        let first_available = usize::from(self.width.saturating_sub(first_x));
+        if !self.pending_wrap && bytes.len() <= first_available {
+            return false;
+        }
+
+        let first_count = first_available.min(bytes.len());
+        let physical_row = self.physical_row(self.cursor.y);
+        let may_have_wide = self.wide_rows.get(physical_row).copied().unwrap_or(true);
+        if !self.pending_wrap
+            && may_have_wide
+            && self.write_range_touches_wide_cell(self.cursor.y, self.cursor.x, first_count as u16)
+        {
+            return false;
+        }
+
+        let old = self.cursor;
+        if self.pending_wrap {
+            self.pending_wrap = false;
+            self.cursor.x = 0;
+            self.scroll_up_region_fast();
+        }
+
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let x = self.cursor.x;
+            let available = usize::from(self.width.saturating_sub(x));
+            let count = available.min(bytes.len() - offset);
+            let physical_row = self.physical_row(self.cursor.y);
+            let chunk = &bytes[offset..offset + count];
+            self.write_ascii_cells(physical_row, x, chunk, style);
+            offset += count;
+
+            if count == available {
+                self.cursor.x = self.width.saturating_sub(1);
+                if offset < bytes.len() {
+                    self.pending_wrap = false;
+                    self.cursor.x = 0;
+                    self.scroll_up_region_fast();
+                } else {
+                    self.pending_wrap = true;
+                    self.mark_line_damage(self.cursor.y, x, count as u16);
+                }
+            } else {
+                self.cursor.x = x.saturating_add(count as u16);
+                self.pending_wrap = false;
+                self.mark_line_damage(self.cursor.y, x, count as u16);
+            }
+        }
+
+        if old != self.cursor {
+            self.generation += 1;
+            self.damage.mark(DamageRegion::Cursor {
+                old: Some((old.x, old.y)),
+                new: (self.cursor.x, self.cursor.y),
+            });
+        }
+        true
+    }
+
     pub fn put_ascii_run_crlf(&mut self, bytes: &[u8], style: Style) -> bool {
         if bytes.is_empty() || self.pending_wrap {
             return false;
@@ -343,16 +421,7 @@ impl Grid {
             return false;
         }
 
-        let start = physical_row * usize::from(self.width) + usize::from(x);
-        for (cell, byte) in self.cells[start..start + count].iter_mut().zip(bytes) {
-            *cell = Cell {
-                ch: char::from(*byte),
-                style,
-                wide: false,
-                spacer: false,
-            };
-        }
-        self.update_row_length_after_ascii_write(physical_row, x, bytes, style);
+        self.write_ascii_cells(physical_row, x, bytes, style);
         self.mark_line_damage(y, x, count as u16);
 
         let old = self.cursor;
@@ -989,11 +1058,12 @@ impl Grid {
         debug_assert_eq!(self.cursor.y, self.scroll_bottom);
 
         let physical_row = self.physical_row(self.cursor.y);
-        let row_start = physical_row * usize::from(self.width);
-        for (cell, byte) in self.cells[row_start..row_start + bytes.len()]
-            .iter_mut()
-            .zip(bytes)
-        {
+        self.write_ascii_cells(physical_row, 0, bytes, style);
+    }
+
+    fn write_ascii_cells(&mut self, physical_row: usize, x: u16, bytes: &[u8], style: Style) {
+        let start = physical_row * usize::from(self.width) + usize::from(x);
+        for (cell, byte) in self.cells[start..start + bytes.len()].iter_mut().zip(bytes) {
             *cell = Cell {
                 ch: char::from(*byte),
                 style,
@@ -1001,7 +1071,7 @@ impl Grid {
                 spacer: false,
             };
         }
-        self.update_row_length_after_ascii_write(physical_row, 0, bytes, style);
+        self.update_row_length_after_ascii_write(physical_row, x, bytes, style);
     }
 
     fn scroll_up_fullscreen_quiet(&mut self) {
@@ -1014,8 +1084,9 @@ impl Grid {
             return;
         }
 
-        let row_start = self.row_start(0);
-        let row_len = usize::from(self.row_length(0));
+        let recycled_row = self.row_offset;
+        let row_start = recycled_row * width;
+        let row_len = usize::from(self.row_lengths.get(recycled_row).copied().unwrap_or(0));
         let buffer = self.scrolled_row_pool.pop();
         self.scrolled_rows.push(scrollback_row_trimmed(
             &self.cells[row_start..row_start + row_len],
@@ -1023,13 +1094,11 @@ impl Grid {
         ));
 
         self.row_offset = (self.row_offset + 1) % height;
-        let bottom_start = self.row_start(self.height.saturating_sub(1));
-        self.cells[bottom_start..bottom_start + width].fill(Cell::default());
-        let physical_row = self.physical_row(self.height.saturating_sub(1));
-        if let Some(wide) = self.wide_rows.get_mut(physical_row) {
+        self.cells[row_start..row_start + width].fill(Cell::default());
+        if let Some(wide) = self.wide_rows.get_mut(recycled_row) {
             *wide = false;
         }
-        if let Some(length) = self.row_lengths.get_mut(physical_row) {
+        if let Some(length) = self.row_lengths.get_mut(recycled_row) {
             *length = 0;
         }
     }

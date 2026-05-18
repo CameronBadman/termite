@@ -9,7 +9,7 @@ where
 {
     pub(super) fn process_fast_sgr(&mut self, input: &[u8]) -> Option<usize> {
         if let Some(len) = self.process_simple_fast_sgr(input) {
-            return Some(len);
+            return Some(self.consume_sgr_trailing_crlf(input, len));
         }
 
         let params = input.strip_prefix(b"\x1b[")?;
@@ -23,7 +23,7 @@ where
 
         if end == 0 {
             self.style = Style::default();
-            return Some(3);
+            return Some(self.consume_sgr_trailing_crlf(input, 3));
         }
 
         for param in params[..end].split(|byte| *byte == b';') {
@@ -34,7 +34,7 @@ where
             };
             self.apply_fast_sgr_code(code)?;
         }
-        Some(end + 3)
+        Some(self.consume_sgr_trailing_crlf(input, end + 3))
     }
 
     fn process_simple_fast_sgr(&mut self, input: &[u8]) -> Option<usize> {
@@ -113,6 +113,18 @@ where
             _ => return None,
         }
         Some(())
+    }
+
+    fn consume_sgr_trailing_crlf(&mut self, input: &[u8], len: usize) -> usize {
+        if input.get(len..len + 2) == Some(b"\r\n") {
+            self.grid.carriage_return_line_feed();
+            len + 2
+        } else if input.get(len..len + 3) == Some(b"\r\r\n") {
+            self.grid.carriage_return_line_feed();
+            len + 3
+        } else {
+            len
+        }
     }
 
     pub(super) fn process_fast_text(&mut self, input: &[u8]) -> usize {

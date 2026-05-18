@@ -62,6 +62,17 @@ fn fast_sgr_path_resumes_fast_text_after_color_sequence() {
 }
 
 #[test]
+fn fast_sgr_path_handles_pty_normalized_crlf() {
+    let mut terminal = TerminalCore::new(4, 2);
+    let _ = terminal.process_pty_input(b"ab\x1b[0m\r\r\ncd");
+
+    assert_eq!(row_text(terminal.grid(), 0), "ab  ");
+    assert_eq!(row_text(terminal.grid(), 1), "cd  ");
+    assert_eq!(terminal.grid().cursor().x, 2);
+    assert_eq!(terminal.grid().cursor().y, 1);
+}
+
+#[test]
 fn clear_command_sequence_clears_visible_screen() {
     let mut terminal = TerminalCore::new(4, 2);
     let tick = terminal.process_pty_input(b"ab\x1b[2;1Hcd\x1b[H\x1b[J");
@@ -315,6 +326,33 @@ fn last_column_wrap_is_deferred_until_next_print() {
     assert_eq!(row_text(terminal.grid(), 0), "abc");
     assert_eq!(row_text(terminal.grid(), 1), "d  ");
     assert_eq!(terminal.grid().cursor().x, 1);
+    assert_eq!(terminal.grid().cursor().y, 1);
+}
+
+#[test]
+fn wrapped_ascii_at_fullscreen_bottom_scrolls_like_scalar_writes() {
+    let mut terminal = TerminalCore::new(4, 2);
+    let _ = terminal.process_pty_input(b"\x1b[2;1Habcdef");
+
+    assert_eq!(row_text(terminal.grid(), 0), "abcd");
+    assert_eq!(row_text(terminal.grid(), 1), "ef  ");
+    assert_eq!(terminal.scrollback_len(), 1);
+    assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "");
+    assert_eq!(terminal.grid().cursor().x, 2);
+    assert_eq!(terminal.grid().cursor().y, 1);
+}
+
+#[test]
+fn wrapped_ascii_crlf_at_fullscreen_bottom_keeps_scrollback_order() {
+    let mut terminal = TerminalCore::new(4, 2);
+    let _ = terminal.process_pty_input(b"\x1b[2;1Habcdef\r\n");
+
+    assert_eq!(row_text(terminal.grid(), 0), "ef  ");
+    assert_eq!(row_text(terminal.grid(), 1), "    ");
+    assert_eq!(terminal.scrollback_len(), 2);
+    assert_eq!(row_slice_text(terminal.scrollback_row(0).unwrap()), "");
+    assert_eq!(row_slice_text(terminal.scrollback_row(1).unwrap()), "abcd");
+    assert_eq!(terminal.grid().cursor().x, 0);
     assert_eq!(terminal.grid().cursor().y, 1);
 }
 
