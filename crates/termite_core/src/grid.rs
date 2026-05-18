@@ -3,7 +3,10 @@ use std::ops::Range;
 use crate::{DamageRegion, DamageTracker, EraseMode, Generation};
 use unicode_width::UnicodeWidthChar;
 
-const SCROLLED_ROW_POOL_LIMIT: usize = 1024;
+// Large output bursts can drain several thousand rows per event. Keeping enough
+// row buffers around avoids allocator churn while the terminal is at scrollback
+// capacity.
+const SCROLLED_ROW_POOL_LIMIT: usize = 16_384;
 const STYLE_BOLD: u8 = 1 << 0;
 const STYLE_ITALIC: u8 = 1 << 1;
 const STYLE_UNDERLINE: u8 = 1 << 2;
