@@ -8,6 +8,10 @@ where
     P: ParserAdapter,
 {
     pub(super) fn process_fast_sgr(&mut self, input: &[u8]) -> Option<usize> {
+        if let Some(len) = self.process_colored_ascii_line(input) {
+            return Some(len);
+        }
+
         if let Some(len) = self.process_simple_fast_sgr(input) {
             return Some(self.consume_sgr_trailing_crlf(input, len));
         }
@@ -113,6 +117,54 @@ where
             _ => return None,
         }
         Some(())
+    }
+
+    fn process_colored_ascii_line(&mut self, input: &[u8]) -> Option<usize> {
+        if self.grid.cursor().x != 0 {
+            return None;
+        }
+
+        let [0x1b, b'[', b'3', digit @ b'0'..=b'7', b'm', ..] = input else {
+            return None;
+        };
+
+        let text_start = 5;
+        let preview = input.get(text_start..text_start + 16)?;
+        if !preview
+            .iter()
+            .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        {
+            return None;
+        }
+
+        let mut text_end = text_start + preview.len();
+        while input
+            .get(text_end)
+            .is_some_and(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        {
+            text_end += 1;
+        }
+        if input.get(text_end..text_end + 4) != Some(b"\x1b[0m") {
+            return None;
+        }
+
+        let reset_end = text_end + 4;
+        let newline_len = if input.get(reset_end..reset_end + 2) == Some(b"\r\n") {
+            2
+        } else if input.get(reset_end..reset_end + 3) == Some(b"\r\r\n") {
+            3
+        } else {
+            return None;
+        };
+
+        let mut line_style = self.style;
+        line_style.foreground = crate::Color::Indexed(digit - b'0');
+        self.grid
+            .put_ascii_run(&input[text_start..text_end], line_style);
+        self.last_printed = char::from(input[text_end - 1]);
+        self.style = Style::default();
+        self.grid.carriage_return_line_feed();
+        Some(reset_end + newline_len)
     }
 
     fn consume_sgr_trailing_crlf(&mut self, input: &[u8], len: usize) -> usize {

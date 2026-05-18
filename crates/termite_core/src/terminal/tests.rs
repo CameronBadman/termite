@@ -73,6 +73,25 @@ fn fast_sgr_path_handles_pty_normalized_crlf() {
 }
 
 #[test]
+fn fast_sgr_path_consumes_colored_ascii_line() {
+    let mut terminal = TerminalCore::new(24, 2);
+    let _ = terminal.process_pty_input(b"\x1b[31mred text line 0001\x1b[0m\r\r\nok");
+
+    assert_eq!(row_text(terminal.grid(), 0), "red text line 0001      ");
+    assert_eq!(row_text(terminal.grid(), 1), "ok                      ");
+    assert_eq!(
+        terminal.grid().cell(0, 0).unwrap().style.foreground,
+        crate::Color::Indexed(1)
+    );
+    assert_eq!(
+        terminal.grid().cell(0, 1).unwrap().style.foreground,
+        crate::Color::DefaultForeground
+    );
+    assert_eq!(terminal.grid().cursor().x, 2);
+    assert_eq!(terminal.grid().cursor().y, 1);
+}
+
+#[test]
 fn clear_command_sequence_clears_visible_screen() {
     let mut terminal = TerminalCore::new(4, 2);
     let tick = terminal.process_pty_input(b"ab\x1b[2;1Hcd\x1b[H\x1b[J");
